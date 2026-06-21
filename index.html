@@ -228,6 +228,15 @@ const isHolidayToday = () => US_MARKET_HOLIDAYS.has(todayYMD());
 const isMarketClosedToday = () => isWeekend() || isHolidayToday();
 const marketClosedReason = () => (isWeekend() ? "es fin de semana" : "es feriado bursátil en EE. UU.");
 
+// Same checks but for an arbitrary 'YYYY-MM-DD' date (used when filtering imported history,
+// not just "today") — guards against data sources that occasionally stamp a value on a
+// weekend (e.g. FX feeds spanning into Sat/Sun) even though the US stock market was closed.
+const isNonTradingDay = (ymd) => {
+  const d = new Date(`${ymd}T12:00:00`);
+  const day = d.getDay();
+  return day === 0 || day === 6 || US_MARKET_HOLIDAYS.has(ymd);
+};
+
 const escapeHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escapeAttr = (s) => escapeHtml(s).replace(/"/g, "&quot;");
 
@@ -1504,7 +1513,7 @@ async function importRealHistory() {
           val.values.forEach((v) => {
             const d = String(v.datetime).slice(0, 10);
             const close = parseFloat(v.close);
-            if (Number.isFinite(close)) map[d] = close;
+            if (Number.isFinite(close) && !isNonTradingDay(d)) map[d] = close;
           });
           if (sym === "USD/BRL") Object.assign(fxRates, map);
           else tickerCloses[sym] = map;
@@ -1547,7 +1556,7 @@ async function importRealHistory() {
   const totalSaldo = state.portfolio.reduce((s, p) => s + parseNum(p.saldo), 0);
 
   const newEntries = [...allDates]
-    .filter((d) => !existingDates.has(d))
+    .filter((d) => !existingDates.has(d) && !isNonTradingDay(d))
     .sort()
     .map((d) => {
       const rows = state.portfolio.map((p) => {
