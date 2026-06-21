@@ -104,6 +104,17 @@ html, body { margin: 0; padding: 0; }
 
 .icon { display: inline-block; vertical-align: middle; flex-shrink: 0; }
 
+.quotes-bar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.quotes-fx { display: flex; flex-direction: column; gap: 4px; min-width: 110px; }
+.input-fx { text-align: left; }
+.quotes-updated { margin: 6px 0 12px; }
+.api-key-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.input-apikey { flex: 1; min-width: 160px; text-align: left; }
+.computed-value { color: #1FD8A4; font-family: 'IBM Plex Mono', monospace; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
 .chart-wrap { width: 100%; overflow: hidden; }
 .chart-svg { display: block; }
 .chart-svg text { font-family: 'IBM Plex Mono', monospace; fill: #7A8290; font-size: 10px; }
@@ -274,8 +285,112 @@ function persistHistory() {
 function resetHojeState() {
   state.hoje = { status: "idle", error: null, reviewMap: {}, fxPctInput: "0", result: null, updateSaldo: false, pasteText: "" };
 }
+function loadQuotesCache() {
+  let apiKey = "", quotes = {}, fxRateInput = "", quotesUpdatedAt = null;
+  try { apiKey = localStorage.getItem("pnl-twelvedata-key") || ""; } catch (_) {}
+  try { quotes = JSON.parse(localStorage.getItem("pnl-quotes") || "{}"); } catch (_) {}
+  try {
+    const fx = JSON.parse(localStorage.getItem("pnl-fx") || "null");
+    fxRateInput = typeof fx === "number" ? String(fx) : "";
+  } catch (_) {}
+  try { quotesUpdatedAt = localStorage.getItem("pnl-quotes-updated-at") || null; } catch (_) {}
+  return { apiKey, quotes, fxRateInput, quotesUpdatedAt };
+}
+
+function persistQuotesCache() {
+  const p = state.posicoes;
+  try {
+    localStorage.setItem("pnl-twelvedata-key", p.apiKey || "");
+    localStorage.setItem("pnl-quotes", JSON.stringify(p.quotes || {}));
+    localStorage.setItem("pnl-fx", JSON.stringify(parseNum(p.fxRateInput) || null));
+    if (p.quotesUpdatedAt) localStorage.setItem("pnl-quotes-updated-at", p.quotesUpdatedAt);
+  } catch (_) {}
+}
+
 function resetPosicoesState() {
-  state.posicoes = { rows: state.portfolio.map((p) => ({ ...p })), dirty: false };
+  const cache = loadQuotesCache();
+  state.posicoes = {
+    rows: state.portfolio.map((p) => ({ ...p, price: typeof p.price === "number" || typeof p.price === "string" ? p.price : (cache.quotes[p.ticker] ?? "") })),
+    dirty: false,
+    apiKey: cache.apiKey,
+    quotes: cache.quotes,
+    fxRateInput: cache.fxRateInput,
+    quotesUpdatedAt: cache.quotesUpdatedAt,
+    quotesStatus: "idle",
+    quotesError: null,
+  };
+}
+
+function rowComputedValue(r) {
+  const fx = parseNum(state.posicoes.fxRateInput);
+  const price = parseNum(r.price);
+  const qty = parseNum(r.quantity);
+  if (!fx || !price) return null;
+  return qty * price * fx;
+}
+
+function timeAgoLabel(iso) {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return "atualizado agora";
+  if (mins < 60) return `atualizado há ${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `atualizado há ${hours}h`;
+  return `atualizado em ${fmtShortDate(iso)}`;
+}
+
+async function fetchQuotes() {
+  const p = state.posicoes;
+  const apiKey = (p.apiKey || "").trim();
+  if (!apiKey) {
+    p.quotesError = "Informe sua chave de API da Twelve Data para buscar cotações (é gratuita).";
+    render();
+    return;
+  }
+  p.quotesStatus = "loading";
+  p.quotesError = null;
+  render();
+
+  try {
+    const tickers = [...new Set(state.portfolio.map((r) => r.ticker).filter(Boolean))];
+    const symbols = [...tickers, "USD/BRL"];
+    const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbols.join(","))}&apikey=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    if (data && data.status === "error") throw new Error(data.message || "Erro na API");
+
+    // Twelve Data returns a flat {price: "..."} when only 1 symbol is requested,
+    // and {SYMBOL: {price: "..."}, ...} when 2+ symbols are requested.
+    const shaped = symbols.length === 1 ? { [symbols[0]]: data } : data;
+
+    const newQuotes = { ...p.quotes };
+    let fxValue = parseNum(p.fxRateInput) || null;
+    const failed = [];
+
+    Object.entries(shaped || {}).forEach(([sym, val]) => {
+      if (!val || typeof val !== "object" || val.status === "error" || !val.price) {
+        failed.push(sym);
+        return;
+      }
+      const num = parseFloat(val.price);
+      if (!Number.isFinite(num)) { failed.push(sym); return; }
+      if (sym === "USD/BRL") fxValue = num;
+      else newQuotes[sym] = num;
+    });
+
+    p.quotes = newQuotes;
+    if (fxValue) p.fxRateInput = String(fxValue);
+    p.quotesUpdatedAt = new Date().toISOString();
+    p.quotesError = failed.length ? `Sem cotação para: ${failed.join(", ")}.` : null;
+    p.rows = p.rows.map((r) => ({ ...r, price: typeof newQuotes[r.ticker] === "number" ? newQuotes[r.ticker] : r.price }));
+    persistQuotesCache();
+  } catch (err) {
+    p.quotesError = "Não consegui buscar as cotações agora. Confira sua chave de API e sua conexão.";
+  }
+  p.quotesStatus = "idle";
+  render();
 }
 function resetHistoricoState() {
   state.historico = { confirmClear: false };
@@ -561,32 +676,84 @@ function saveHistoryAction() {
 /*  Render: POSIÇÕES tab                                                   */
 /* ---------------------------------------------------------------------- */
 
+function rowEffectiveValue(r) {
+  const computed = rowComputedValue(r);
+  return computed !== null ? computed : parseNum(r.saldo) || 0;
+}
+
+function updateRowValueCell(id) {
+  const row = state.posicoes.rows.find((r) => r.id === id);
+  const cell = document.getElementById(`value-cell-${id}`);
+  if (!row || !cell) return;
+  const computed = rowComputedValue(row);
+  cell.innerHTML =
+    computed !== null
+      ? `<span class="computed-value" id="value-${id}">${fmtBRL(computed)}</span>`
+      : `<input class="input-cell" inputmode="decimal" data-bind="saldo" data-id="${id}" value="${escapeAttr(row.saldo)}">`;
+}
+
+function updateLiveTotal() {
+  const liveTotal = state.posicoes.rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
+  const span = document.getElementById("live-total");
+  if (span) span.textContent = fmtBRL(liveTotal);
+}
+
 function renderPosicoes() {
-  const rows = state.posicoes.rows;
-  const liveTotal = rows.reduce((s, r) => s + (parseNum(r.saldo) || 0), 0);
+  const p = state.posicoes;
+  const rows = p.rows;
+  const liveTotal = rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
+  const fx = parseNum(p.fxRateInput);
 
   const rowsHtml = rows
-    .map(
-      (r) => `
+    .map((r) => {
+      const computed = rowComputedValue(r);
+      const valueCell =
+        computed !== null
+          ? `<span class="computed-value" id="value-${r.id}">${fmtBRL(computed)}</span>`
+          : `<input class="input-cell" inputmode="decimal" data-bind="saldo" data-id="${r.id}" value="${escapeAttr(r.saldo)}">`;
+      return `
       <tr>
         <td><input class="input-cell" data-bind="ticker" data-id="${r.id}" value="${escapeAttr(r.ticker)}" placeholder="PG"></td>
         <td><input class="input-cell" data-bind="broker" data-id="${r.id}" value="${escapeAttr(r.broker)}" placeholder="Nomad"></td>
         <td class="num"><input class="input-cell" inputmode="decimal" data-bind="quantity" data-id="${r.id}" value="${escapeAttr(r.quantity)}"></td>
-        <td class="num"><input class="input-cell" inputmode="decimal" data-bind="saldo" data-id="${r.id}" value="${escapeAttr(r.saldo)}"></td>
+        <td class="num"><input class="input-cell" inputmode="decimal" data-bind="price" data-id="${r.id}" value="${escapeAttr(r.price)}" placeholder="0,00"></td>
+        <td class="num" id="value-cell-${r.id}">${valueCell}</td>
         <td><button class="icon-btn" data-action="remove-row" data-id="${r.id}" title="Remover">${icon("trash", 14)}</button></td>
-      </tr>`
-    )
+      </tr>`;
+    })
     .join("");
 
   return `
     <div class="stack">
       <div class="card">
         <div class="card-title-row">
+          <h2 class="card-title">Cotações automáticas</h2>
+        </div>
+        ${p.quotesError ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(p.quotesError)}</div>` : ""}
+        <div class="quotes-bar">
+          <div class="quotes-fx">
+            <span class="muted small">Câmbio USD/BRL</span>
+            <input class="input-cell input-fx" inputmode="decimal" data-bind="fxRate" value="${escapeAttr(p.fxRateInput)}" placeholder="0,00">
+          </div>
+          <button class="btn btn-ghost btn-sm" data-action="fetch-quotes" ${p.quotesStatus === "loading" ? "disabled" : ""}>
+            ${icon("refresh", 13, p.quotesStatus === "loading" ? "spin" : "")} ${p.quotesStatus === "loading" ? "Buscando…" : "Atualizar cotações"}
+          </button>
+        </div>
+        <p class="quotes-updated small muted">${p.quotesUpdatedAt ? timeAgoLabel(p.quotesUpdatedAt) : "ainda não buscado"}</p>
+        <div class="api-key-row">
+          <input class="input-cell input-apikey" data-bind="apiKey" value="${escapeAttr(p.apiKey)}" placeholder="Chave de API Twelve Data">
+          <a class="muted small" href="https://twelvedata.com/pricing" target="_blank" rel="noopener">Criar chave gratuita ↗</a>
+        </div>
+        <p class="upload-hint">O preço (US$) de cada posição é preenchido automaticamente ao atualizar as cotações, mas você pode digitar por cima se quiser. Sem preço e câmbio, o valor volta a ser editável manualmente.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title-row">
           <h2 class="card-title">Posições da carteira</h2>
           <span class="muted small" id="live-total">${fmtBRL(liveTotal)}</span>
         </div>
         <table class="table table-editable">
-          <thead><tr><th>Ticker</th><th>Corretora</th><th class="num">Qtd.</th><th class="num">Saldo base (R$)</th><th></th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Corretora</th><th class="num">Qtd.</th><th class="num">Preço (US$)</th><th class="num">Valor (R$)</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
         <div class="row-actions">
@@ -598,7 +765,7 @@ function renderPosicoes() {
 }
 
 function addRow() {
-  state.posicoes.rows = [...state.posicoes.rows, { id: uid(), ticker: "", broker: "", quantity: 0, saldo: 0 }];
+  state.posicoes.rows = [...state.posicoes.rows, { id: uid(), ticker: "", broker: "", quantity: 0, price: "", saldo: 0 }];
   state.posicoes.dirty = true;
   render();
 }
@@ -617,7 +784,8 @@ function savePositions() {
       ticker: String(r.ticker).trim().toUpperCase(),
       broker: String(r.broker).trim(),
       quantity: parseNum(r.quantity),
-      saldo: parseNum(r.saldo),
+      price: parseNum(r.price) || 0,
+      saldo: Math.round(rowEffectiveValue(r) * 100) / 100,
     }));
   state.portfolio = cleaned;
   persistPortfolio();
@@ -781,6 +949,7 @@ function handleAction(action, el) {
     case "add-row": addRow(); break;
     case "remove-row": removeRow(id); break;
     case "save-positions": savePositions(); break;
+    case "fetch-quotes": fetchQuotes(); break;
     case "add-demo": addDemo(); break;
     case "clear-history": clearHistoryAction(); break;
     case "remove-entry": removeEntryAction(id); break;
@@ -816,17 +985,26 @@ root.addEventListener("input", (e) => {
       const banner = root.querySelector(".banner-warn");
       if (banner) banner.remove();
     }
-  } else if (["ticker", "broker", "quantity", "saldo"].includes(bind)) {
+  } else if (bind === "apiKey") {
+    state.posicoes.apiKey = el.value;
+    persistQuotesCache();
+  } else if (bind === "fxRate") {
+    state.posicoes.fxRateInput = el.value;
+    persistQuotesCache();
+    state.posicoes.rows.forEach((r) => updateRowValueCell(r.id));
+    updateLiveTotal();
+  } else if (["ticker", "broker", "quantity", "price", "saldo"].includes(bind)) {
     const row = state.posicoes.rows.find((r) => r.id === id);
     if (row) {
       row[bind] = el.value;
       state.posicoes.dirty = true;
       const saveBtn = document.querySelector('[data-action="save-positions"]');
       if (saveBtn) saveBtn.disabled = false;
-      if (bind === "saldo") {
-        const liveTotal = state.posicoes.rows.reduce((s, r) => s + (parseNum(r.saldo) || 0), 0);
-        const span = document.getElementById("live-total");
-        if (span) span.textContent = fmtBRL(liveTotal);
+      if (bind === "quantity" || bind === "price") {
+        updateRowValueCell(id);
+        updateLiveTotal();
+      } else if (bind === "saldo") {
+        updateLiveTotal();
       }
     }
   }
