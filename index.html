@@ -112,6 +112,15 @@ html, body { margin: 0; padding: 0; background: #0A0D10; }
 .error-list li:last-child { margin-bottom: 0; }
 
 .empty-state { text-align: center; color: #7A8290; padding: 30px 16px; }
+.total-return-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; }
+.total-return-value { font-family: 'Space Grotesk', sans-serif; font-size: 20px; font-weight: 700; }
+.breakdown-subtitle { margin: 14px 0 8px; }
+.breakdown-subtitle:first-of-type { margin-top: 0; }
+.breakdown-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.breakdown-label { width: 64px; flex-shrink: 0; font-size: 12px; font-family: 'IBM Plex Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.breakdown-bar-track { flex: 1; height: 8px; background: #1C2128; border-radius: 4px; overflow: hidden; }
+.breakdown-bar-fill { height: 100%; border-radius: 4px; }
+.breakdown-pct { width: 44px; flex-shrink: 0; text-align: right; font-size: 12px; font-family: 'IBM Plex Mono', monospace; color: #ABB2BC; }
 
 .icon { display: inline-block; vertical-align: middle; flex-shrink: 0; }
 
@@ -194,6 +203,26 @@ const isWeekend = () => {
   const day = new Date().getDay();
   return day === 0 || day === 6;
 };
+
+// NYSE/Nasdaq full-closure holidays. Source: NYSE Group official holiday calendar
+// announcements (2025-2027). Needs a manual update once 2028 dates are published.
+const US_MARKET_HOLIDAYS = new Set([
+  "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26",
+  "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25",
+  "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+  "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+  "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+]);
+
+const todayYMD = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const isHolidayToday = () => US_MARKET_HOLIDAYS.has(todayYMD());
+const isMarketClosedToday = () => isWeekend() || isHolidayToday();
+const marketClosedReason = () => (isWeekend() ? "es fin de semana" : "es feriado bursátil en EE. UU.");
 
 const escapeHtml = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escapeAttr = (s) => escapeHtml(s).replace(/"/g, "&quot;");
@@ -332,6 +361,8 @@ function persistHistory() {
 }
 
 function resetHojeState() {
+  let quickSave = false;
+  try { quickSave = localStorage.getItem("pnl-quick-save") === "1"; } catch (_) {}
   state.hoje = {
     status: "idle",
     error: null,
@@ -342,6 +373,7 @@ function resetHojeState() {
     pasteText: "",
     fetchStatus: "idle",
     fetchProgressLabel: null,
+    quickSave,
   };
 }
 function loadQuotesCache() {
@@ -499,7 +531,51 @@ async function fetchQuotes() {
   render();
 }
 function resetHistoricoState() {
-  state.historico = { confirmClear: false, importStatus: "idle", importProgressLabel: null, importMessage: null, importError: null };
+  state.historico = {
+    confirmClear: false,
+    importStatus: "idle",
+    importProgressLabel: null,
+    importMessage: null,
+    importError: null,
+    editingId: null,
+    editReviewMap: {},
+    editFxInput: "0",
+  };
+}
+
+function startEditEntry(id) {
+  const entry = state.history.find((h) => h.id === id);
+  if (!entry) return;
+  const map = {};
+  entry.rows.forEach((r) => { map[r.id] = String(r.changePct); });
+  state.historico.editingId = id;
+  state.historico.editReviewMap = map;
+  state.historico.editFxInput = String(entry.fxPct);
+  render();
+}
+
+function cancelEditEntry() {
+  state.historico.editingId = null;
+  render();
+}
+
+function saveEntryEdit() {
+  const hs = state.historico;
+  const entry = state.history.find((h) => h.id === hs.editingId);
+  if (!entry) return;
+  const fxPct = parseNum(hs.editFxInput);
+  const totalSaldoAtEntry = entry.rows.reduce((s, r) => s + parseNum(r.saldo), 0);
+  entry.rows = entry.rows.map((r) => {
+    const pct = parseNum(hs.editReviewMap[r.id]);
+    return { ...r, changePct: pct, gain: (parseNum(r.saldo) * pct) / 100 };
+  });
+  entry.priceTotal = entry.rows.reduce((s, r) => s + r.gain, 0);
+  entry.fxPct = fxPct;
+  entry.fxGain = (totalSaldoAtEntry * fxPct) / 100;
+  entry.total = entry.priceTotal + entry.fxGain;
+  persistHistory();
+  hs.editingId = null;
+  render();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -605,7 +681,7 @@ function renderHoje() {
     inner = `
       <div class="card upload-card">
         ${h.error ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(h.error)}</div>` : ""}
-        ${isWeekend() ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} Hoy es fin de semana: el mercado está cerrado. La búsqueda automática traería el último cierre (viernes), no el de hoy.</div>` : ""}
+        ${isMarketClosedToday() ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} Hoy ${marketClosedReason()}: el mercado está cerrado. La búsqueda automática traería el último cierre disponible, no el de hoy.</div>` : ""}
         ${icon("camera", 28, "muted")}
         <p class="upload-text">Registra la variación de hoy buscando las cotizaciones automáticamente, pegando los números que ya tienes, o llenando manualmente.</p>
         <button class="btn btn-primary" data-action="fetch-live-day-change" ${h.fetchStatus === "loading" ? "disabled" : ""}>
@@ -618,6 +694,10 @@ function renderHoje() {
         <p class="upload-hint">Consejo: copia los porcentajes de variación del día de cada activo y del dólar (USDBRL) y pega todo de una vez.</p>
         <div class="divider-text">o</div>
         <button class="btn btn-ghost" data-action="start-manual">${icon("pencil", 15)} Llenar manualmente</button>
+        <label class="checkbox-row">
+          <input type="checkbox" data-bind="quickSave" ${h.quickSave ? "checked" : ""}>
+          Guardar automáticamente después de buscar (sin revisar)
+        </label>
       </div>`;
   } else if (h.status === "review" || h.status === "result") {
     inner = renderHojeReviewResult();
@@ -778,8 +858,8 @@ async function fetchLiveDayChange() {
   await Promise.all([stocksPromise, fxPromise]);
   h.fetchProgressLabel = null;
 
-  if (isWeekend()) {
-    errors.unshift("Hoy es fin de semana: el mercado de EE. UU. está cerrado. Estos valores son del último cierre (probablemente viernes), no de hoy. (No detecto feriados.)");
+  if (isMarketClosedToday()) {
+    errors.unshift(`Hoy ${marketClosedReason()}: el mercado de EE. UU. está cerrado. Estos valores son del último cierre disponible, no de hoy.`);
   }
 
   const map = {};
@@ -792,7 +872,12 @@ async function fetchLiveDayChange() {
   h.error = errors.length ? errors.join(" ") : null;
   h.fetchStatus = "idle";
   h.status = "review";
-  render();
+  if (h.quickSave && !h.error) {
+    compute();
+    saveHistoryAction();
+  } else {
+    render();
+  }
 }
 
 function parsePasted() {
@@ -816,7 +901,12 @@ function parsePasted() {
   state.hoje.fxPctInput = typeof fx === "number" ? String(fx) : "0";
   state.hoje.error = null;
   state.hoje.status = "review";
-  render();
+  if (state.hoje.quickSave) {
+    compute();
+    saveHistoryAction();
+  } else {
+    render();
+  }
 }
 
 function compute() {
@@ -889,6 +979,42 @@ function updateLiveTotal() {
   if (span) span.textContent = fmtBRL(liveTotal);
   const headerSpan = document.getElementById("header-total-value");
   if (headerSpan) headerSpan.textContent = fmtBRL(liveTotal);
+}
+
+function renderBreakdown(rows) {
+  const total = rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
+  if (!total) return "";
+
+  const bar = (label, value, color) => {
+    const pct = total ? (value / total) * 100 : 0;
+    return `<div class="breakdown-row">
+      <div class="breakdown-label">${escapeHtml(label)}</div>
+      <div class="breakdown-bar-track"><div class="breakdown-bar-fill" style="width:${Math.max(pct, 1).toFixed(1)}%;background:${color}"></div></div>
+      <div class="breakdown-pct">${pct.toFixed(1)}%</div>
+    </div>`;
+  };
+
+  const byTicker = {};
+  rows.forEach((r) => { byTicker[r.ticker || "—"] = (byTicker[r.ticker || "—"] || 0) + rowEffectiveValue(r); });
+  const tickerRows = Object.entries(byTicker)
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, v]) => bar(t, v, avatarColor(t)))
+    .join("");
+
+  const byBroker = {};
+  rows.forEach((r) => { byBroker[r.broker || "—"] = (byBroker[r.broker || "—"] || 0) + rowEffectiveValue(r); });
+  const brokerRows = Object.entries(byBroker)
+    .sort((a, b) => b[1] - a[1])
+    .map(([b, v]) => bar(b, v, avatarColor(b)))
+    .join("");
+
+  return `<div class="card">
+    <h2 class="card-title">Distribución de la cartera</h2>
+    <p class="muted small breakdown-subtitle">Por activo</p>
+    ${tickerRows}
+    <p class="muted small breakdown-subtitle">Por corretora</p>
+    ${brokerRows}
+  </div>`;
 }
 
 function renderPosicoes() {
@@ -968,6 +1094,18 @@ function renderPosicoes() {
           <button class="btn btn-ghost" data-action="add-row">${icon("plus", 15)} Agregar posición</button>
           <button class="btn btn-primary" data-action="save-positions" ${state.posicoes.dirty ? "" : "disabled"}>${icon("save", 15)} Guardar posiciones</button>
         </div>
+      </div>
+
+      ${renderBreakdown(rows)}
+
+      <div class="card">
+        <h2 class="card-title">Copia de seguridad</h2>
+        <p class="muted small">Descarga un archivo con tus posiciones, historial y claves, para no perderlos si borras los datos del sitio. Lo mismo sirve para pasar todo a otro celular.</p>
+        <div class="row-actions">
+          <button class="btn btn-ghost" data-action="export-backup">${icon("download", 15)} Exportar datos</button>
+          <button class="btn btn-ghost" data-action="trigger-import-backup">${icon("refresh", 15)} Importar datos</button>
+        </div>
+        <input type="file" id="import-backup-input" accept="application/json" hidden>
       </div>
     </div>`;
 }
@@ -1050,6 +1188,45 @@ function renderHistorico() {
   const lineSvg = buildChart({ type: "line", data: chartData, valueKey: "cumulative", labelKey: "date", height: 200 });
   const barSvg = buildChart({ type: "bar", data: chartData, valueKey: "total", labelKey: "date", height: 160 });
 
+  const totalSaldoForReturn = state.portfolio.reduce((s, p) => s + (parseNum(p.saldo) || 0), 0);
+  const baseSaldo = totalSaldoForReturn - cum;
+  const totalReturnPct = baseSaldo > 0 ? (cum / baseSaldo) * 100 : 0;
+  const firstDate = sorted.length ? fmtFullDate(sorted[0].date) : "";
+  const totalReturnHtml = sorted.length
+    ? `<div class="card total-return-card">
+        <span class="muted small">Rendimiento total desde ${firstDate}</span>
+        <span class="total-return-value ${cum >= 0 ? "up" : "down"}">${cum >= 0 ? "+" : ""}${fmtBRL(cum)} (${fmtPct(totalReturnPct)})</span>
+      </div>`
+    : "";
+
+  const editingEntry = hs.editingId ? state.history.find((h) => h.id === hs.editingId) : null;
+  const editCardHtml = editingEntry
+    ? `<div class="card">
+        <h2 class="card-title">Editando ${fmtFullDate(editingEntry.date)}</h2>
+        <div class="table-scroll"><table class="table">
+          <thead><tr><th>Activo</th><th class="num">% día</th></tr></thead>
+          <tbody>
+            ${editingEntry.rows
+              .map(
+                (r) => `<tr>
+              <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b><span class="muted small"> · ${escapeHtml(r.broker)}</span></span></div></td>
+              <td class="num"><input class="input-cell" inputmode="decimal" data-bind="editReview" data-id="${r.id}" value="${escapeAttr(hs.editReviewMap[r.id] ?? "0")}"></td>
+            </tr>`
+              )
+              .join("")}
+            <tr class="row-fx">
+              <td><b>USD/BRL</b><span class="muted small"> · cambio del día</span></td>
+              <td class="num"><input class="input-cell" inputmode="decimal" data-bind="editFx" value="${escapeAttr(hs.editFxInput)}"></td>
+            </tr>
+          </tbody>
+        </table></div>
+        <div class="row-actions">
+          <button class="btn btn-ghost" data-action="cancel-entry-edit">${icon("x", 15)} Cancelar</button>
+          <button class="btn btn-primary" data-action="save-entry-edit">${icon("save", 15)} Guardar cambios</button>
+        </div>
+      </div>`
+    : "";
+
   const rowsHtml = [...state.history]
     .reverse()
     .map(
@@ -1059,21 +1236,27 @@ function renderHistorico() {
         <td class="num small ${h.priceTotal >= 0 ? "up" : "down"}">${fmtBRL(h.priceTotal)}</td>
         <td class="num small ${h.fxGain >= 0 ? "up" : "down"}">${fmtBRL(h.fxGain)}</td>
         <td class="num ${h.total >= 0 ? "up" : "down"}"><b>${fmtBRL(h.total)}</b></td>
-        <td><button class="icon-btn" data-action="remove-entry" data-id="${h.id}" title="Eliminar registro">${icon("trash", 14)}</button></td>
+        <td>
+          <button class="icon-btn" data-action="edit-entry" data-id="${h.id}" title="Editar registro">${icon("pencil", 14)}</button>
+          <button class="icon-btn" data-action="remove-entry" data-id="${h.id}" title="Eliminar registro">${icon("trash", 14)}</button>
+        </td>
       </tr>`
     )
     .join("");
 
   return `
     <div class="stack">
+      ${editCardHtml}
       ${importBanner}
       <div class="toolbar-row">
         <button class="btn btn-ghost btn-sm" data-action="import-real-history" ${hs.importStatus === "loading" ? "disabled" : ""}>
           ${icon("refresh", 13, hs.importStatus === "loading" ? "spin" : "")} ${importBtnLabel}
         </button>
         <button class="btn btn-ghost btn-sm" data-action="add-demo">${icon("sparkles", 13)} Generar más datos de prueba</button>
+        <button class="btn btn-ghost btn-sm" data-action="export-csv">${icon("download", 13)} Exportar CSV</button>
         <button class="btn btn-ghost btn-sm" data-action="clear-history">${icon("trash", 13)} ${hs.confirmClear ? "¿Confirmar borrado?" : "Borrar historial"}</button>
       </div>
+      ${totalReturnHtml}
       <div class="card">
         <h2 class="card-title">Patrimonio acumulado</h2>
         <div class="chart-wrap">${lineSvg}</div>
@@ -1249,6 +1432,95 @@ function removeEntryAction(id) {
   render();
 }
 
+function downloadBlob(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportBackup() {
+  const cache = loadQuotesCache();
+  const backup = {
+    type: "pnl-tracker-backup",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    portfolio: state.portfolio,
+    history: state.history,
+    apiKey: cache.apiKey,
+    finnhubKey: cache.finnhubKey,
+    quotes: cache.quotes,
+    logos: cache.logos,
+    fxRateInput: cache.fxRateInput,
+  };
+  downloadBlob(JSON.stringify(backup, null, 2), `pnl-backup-${todayYMD()}.json`, "application/json");
+}
+
+function importBackupFile(file) {
+  const p = state.posicoes;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (!data || data.type !== "pnl-tracker-backup" || !Array.isArray(data.portfolio)) {
+        p.quotesError = ["Ese archivo no parece ser una copia de seguridad válida de esta app."];
+        render();
+        return;
+      }
+      state.portfolio = data.portfolio;
+      state.history = Array.isArray(data.history) ? data.history : [];
+      try {
+        localStorage.setItem("pnl-twelvedata-key", data.apiKey || "");
+        localStorage.setItem("pnl-finnhub-key", data.finnhubKey || "");
+        localStorage.setItem("pnl-quotes", JSON.stringify(data.quotes || {}));
+        localStorage.setItem("pnl-logos", JSON.stringify(data.logos || {}));
+        localStorage.setItem("pnl-fx", JSON.stringify(typeof data.fxRateInput === "string" ? parseNum(data.fxRateInput) : data.fxRateInput || null));
+      } catch (_) {}
+      persistPortfolio();
+      persistHistory();
+      resetPosicoesState();
+      state.posicoes.quotesError = null;
+      state.posicoes.dirty = false;
+      render();
+    } catch (err) {
+      p.quotesError = ["No pude leer ese archivo (¿es un JSON válido exportado desde esta app?)."];
+      render();
+    }
+  };
+  reader.readAsText(file);
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function exportCsv() {
+  const tickers = [...new Set(state.portfolio.map((p) => p.ticker).filter(Boolean))];
+  const header = ["fecha", "precios_brl", "cambio_brl", "total_brl", ...tickers.map((t) => `${t}_%`)];
+  const lines = [header.map(csvEscape).join(",")];
+  [...state.history]
+    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .forEach((h) => {
+      const pctByTicker = {};
+      h.rows.forEach((r) => { pctByTicker[r.ticker] = r.changePct; });
+      const row = [
+        fmtFullDate(h.date),
+        h.priceTotal.toFixed(2),
+        h.fxGain.toFixed(2),
+        h.total.toFixed(2),
+        ...tickers.map((t) => (typeof pctByTicker[t] === "number" ? pctByTicker[t].toFixed(4) : "")),
+      ];
+      lines.push(row.map(csvEscape).join(","));
+    });
+  downloadBlob(lines.join("\n"), `pnl-historial-${todayYMD()}.csv`, "text/csv;charset=utf-8");
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Top-level render & event wiring                                       */
 /* ---------------------------------------------------------------------- */
@@ -1328,9 +1600,15 @@ function handleAction(action, el) {
     case "move-row-up": moveRow(id, -1); break;
     case "move-row-down": moveRow(id, 1); break;
     case "save-positions": savePositions(); break;
+    case "export-backup": exportBackup(); break;
+    case "trigger-import-backup": document.getElementById("import-backup-input")?.click(); break;
     case "fetch-quotes": fetchQuotes(); break;
     case "add-demo": addDemo(); break;
     case "import-real-history": importRealHistory(); break;
+    case "export-csv": exportCsv(); break;
+    case "edit-entry": startEditEntry(id); break;
+    case "cancel-entry-edit": cancelEditEntry(); break;
+    case "save-entry-edit": saveEntryEdit(); break;
     case "clear-history": clearHistoryAction(); break;
     case "remove-entry": removeEntryAction(id); break;
     case "install-app": installApp(); break;
@@ -1355,6 +1633,10 @@ root.addEventListener("input", (e) => {
     state.hoje.reviewMap[id] = el.value;
   } else if (bind === "fx") {
     state.hoje.fxPctInput = el.value;
+  } else if (bind === "editReview") {
+    state.historico.editReviewMap[id] = el.value;
+  } else if (bind === "editFx") {
+    state.historico.editFxInput = el.value;
   } else if (bind === "paste") {
     state.hoje.pasteText = el.value;
     const btn = document.querySelector('[data-action="parse-pasted"]');
@@ -1396,6 +1678,17 @@ root.addEventListener("input", (e) => {
 root.addEventListener("change", (e) => {
   const el = e.target.closest('[data-bind="updateSaldo"]');
   if (el) state.hoje.updateSaldo = el.checked;
+
+  const quickSaveEl = e.target.closest('[data-bind="quickSave"]');
+  if (quickSaveEl) {
+    state.hoje.quickSave = quickSaveEl.checked;
+    try { localStorage.setItem("pnl-quick-save", quickSaveEl.checked ? "1" : "0"); } catch (_) {}
+  }
+
+  if (e.target.id === "import-backup-input" && e.target.files?.[0]) {
+    importBackupFile(e.target.files[0]);
+    e.target.value = "";
+  }
 });
 
 /* ---------------------------------------------------------------------- */
