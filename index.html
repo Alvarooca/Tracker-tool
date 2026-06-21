@@ -275,12 +275,14 @@ function avatarColor(ticker) {
 
 function avatarHtml(ticker, logoUrl, size = 22) {
   const initial = escapeHtml((ticker || "?").slice(0, 1).toUpperCase());
-  const fallback = `<span class="avatar-fallback" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.55)}px;background:${avatarColor(ticker || "?")}">${initial}</span>`;
+  const color = avatarColor(ticker || "?");
+  const fallback = `<span class="avatar-fallback" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.55)}px;background:${color};${logoUrl ? "display:none" : ""}">${initial}</span>`;
   if (!logoUrl) return fallback;
   const safeUrl = escapeAttr(logoUrl);
-  // onerror swaps the broken <img> for the same fallback markup, escaping single quotes for the inline handler.
-  const fallbackForError = fallback.replace(/'/g, "\\'");
-  return `<img class="avatar-img" src="${safeUrl}" width="${size}" height="${size}" alt="" loading="lazy" onerror="this.outerHTML='${fallbackForError}'">`;
+  // No HTML is embedded inside the onerror attribute (that caused quote-escaping bugs) —
+  // it just toggles visibility of the always-present fallback span right next to it.
+  const img = `<img class="avatar-img" src="${safeUrl}" width="${size}" height="${size}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'">`;
+  return img + fallback;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -614,7 +616,7 @@ function renderHoje() {
 
 function renderHojeReviewResult() {
   const h = state.hoje;
-  const portfolio = state.portfolio;
+  const portfolio = [...state.portfolio].sort((a, b) => parseNum(a.saldo) - parseNum(b.saldo));
 
   const rowsHtml = portfolio
     .map((p) => {
@@ -873,10 +875,11 @@ function updateLiveTotal() {
 function renderPosicoes() {
   const p = state.posicoes;
   const rows = p.rows;
+  const displayRows = [...rows].sort((a, b) => rowEffectiveValue(a) - rowEffectiveValue(b));
   const liveTotal = rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
   const fx = parseNum(p.fxRateInput);
 
-  const rowsHtml = rows
+  const rowsHtml = displayRows
     .map((r) => {
       const computed = rowComputedValue(r);
       const valueCell =
