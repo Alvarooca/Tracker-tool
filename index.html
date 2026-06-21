@@ -425,6 +425,7 @@ function resetPosicoesState() {
     quotesStatus: "idle",
     quotesProgressLabel: null,
     quotesError: null,
+    importPurchasesMessage: null,
   };
 }
 
@@ -540,7 +541,43 @@ function resetHistoricoState() {
     editingId: null,
     editReviewMap: {},
     editFxInput: "0",
+    spxStatus: "idle",
+    spxPct: null,
+    spxError: null,
   };
+}
+
+async function compareSpx() {
+  const hs = state.historico;
+  const twelveKey = (state.posicoes.apiKey || "").trim();
+  if (!twelveKey) {
+    hs.spxError = "Configura tu clave de Twelve Data en la pestaña Posiciones primero.";
+    render();
+    return;
+  }
+  const sorted = [...state.history].sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (!sorted.length) return;
+  hs.spxStatus = "loading";
+  hs.spxError = null;
+  render();
+  try {
+    const start = sorted[0].date.slice(0, 10);
+    const end = new Date().toISOString().slice(0, 10);
+    const url = `https://api.twelvedata.com/time_series?symbol=SPY&interval=1day&start_date=${start}&end_date=${end}&apikey=${encodeURIComponent(twelveKey)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data && data.status === "error") throw new Error(data.message || "Error en Twelve Data");
+    if (!Array.isArray(data?.values) || data.values.length < 2) throw new Error("Sin suficientes datos del S&P 500 para ese período.");
+    const byDate = [...data.values].sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
+    const first = parseFloat(byDate[0].close);
+    const last = parseFloat(byDate[byDate.length - 1].close);
+    if (!first) throw new Error("Dato inválido");
+    hs.spxPct = ((last - first) / first) * 100;
+  } catch (err) {
+    hs.spxError = err.message || "No pude comparar con el S&P 500 (sin conexión).";
+  }
+  hs.spxStatus = "idle";
+  render();
 }
 
 function startEditEntry(id) {
@@ -981,6 +1018,51 @@ function updateLiveTotal() {
   if (headerSpan) headerSpan.textContent = fmtBRL(liveTotal);
 }
 
+function renderUnrealized(rows) {
+  const withCost = rows.filter((r) => typeof r.avgCost === "number" && r.avgCost > 0);
+  if (!withCost.length) return "";
+  const fx = parseNum(state.posicoes.fxRateInput);
+
+  let totalCostUsd = 0;
+  let totalNowUsd = 0;
+  const itemsHtml = withCost
+    .map((r) => {
+      const price = parseNum(r.price);
+      const qty = parseNum(r.quantity);
+      const costBasisUsd = r.avgCost * qty;
+      const hasPrice = price > 0;
+      const nowValueUsd = hasPrice ? price * qty : costBasisUsd;
+      totalCostUsd += costBasisUsd;
+      totalNowUsd += nowValueUsd;
+      const gainUsd = nowValueUsd - costBasisUsd;
+      const pct = costBasisUsd ? (gainUsd / costBasisUsd) * 100 : 0;
+      const gainBrl = fx ? gainUsd * fx : null;
+      return `<tr>
+        <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b></span></div></td>
+        <td class="num small">$${r.avgCost.toFixed(2)}</td>
+        <td class="num small">${hasPrice ? "$" + price.toFixed(2) : "—"}</td>
+        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}</b>${hasPrice ? `<br><span class="small">${fmtPct(pct)}</span>` : ""}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const totalGainUsd = totalNowUsd - totalCostUsd;
+  const totalPct = totalCostUsd ? (totalGainUsd / totalCostUsd) * 100 : 0;
+  const totalGainBrl = fx ? totalGainUsd * fx : null;
+
+  return `<div class="card">
+    <div class="card-title-row">
+      <h2 class="card-title">Ganancia/pérdida no realizada</h2>
+      <span class="${totalGainUsd >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalPct)})</b></span>
+    </div>
+    <p class="muted small">Compara el precio promedio de compra (importado) con el precio actual de cada activo, en dólares. ${fx ? "Convertido a reales con el cambio configurado." : "Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th>Activo</th><th class="num">Compra</th><th class="num">Actual</th><th class="num">Ganancia</th></tr></thead>
+      <tbody>${itemsHtml}</tbody>
+    </table></div>
+  </div>`;
+}
+
 function renderBreakdown(rows) {
   const total = rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
   if (!total) return "";
@@ -1098,6 +1180,18 @@ function renderPosicoes() {
 
       ${renderBreakdown(rows)}
 
+      ${renderUnrealized(rows)}
+
+      <div class="card">
+        <h2 class="card-title">Precio de compra</h2>
+        <p class="muted small">Importa tu historial de compras/ventas (CSV exportado de TradingView: columnas symbol, date, type, qty, price) para calcular el precio promedio de compra de cada activo y ver la ganancia no realizada.</p>
+        ${state.posicoes.importPurchasesMessage ? `<div class="banner banner-ok">${icon("check-circle", 15)} ${escapeHtml(state.posicoes.importPurchasesMessage)}</div>` : ""}
+        <div class="row-actions">
+          <button class="btn btn-ghost" data-action="trigger-import-purchases">${icon("refresh", 15)} Importar historial de compras (CSV)</button>
+        </div>
+        <input type="file" id="import-purchases-input" accept=".csv,text/csv" hidden>
+      </div>
+
       <div class="card">
         <h2 class="card-title">Copia de seguridad</h2>
         <p class="muted small">Descarga un archivo con tus posiciones, historial y claves, para no perderlos si borras los datos del sitio. Lo mismo sirve para pasar todo a otro celular.</p>
@@ -1192,10 +1286,40 @@ function renderHistorico() {
   const baseSaldo = totalSaldoForReturn - cum;
   const totalReturnPct = baseSaldo > 0 ? (cum / baseSaldo) * 100 : 0;
   const firstDate = sorted.length ? fmtFullDate(sorted[0].date) : "";
+  const spxLabel = hs.spxStatus === "loading" ? "Comparando…" : "Comparar con S&P 500";
+  const spxResultHtml = hs.spxError
+    ? `<p class="small down" style="margin-top:8px">${escapeHtml(hs.spxError)}</p>`
+    : hs.spxPct !== null
+    ? `<p class="small muted" style="margin-top:8px">S&amp;P 500 en el mismo período: <span class="${hs.spxPct >= 0 ? "up" : "down"}"><b>${fmtPct(hs.spxPct)}</b></span> ${
+        cum >= 0 === hs.spxPct >= 0 ? (totalReturnPct > hs.spxPct ? "— le vas ganando 🎯" : "— el índice te va ganando") : ""
+      }</p>`
+    : "";
+
+  const monthly = {};
+  sorted.forEach((h) => {
+    const key = String(h.date).slice(0, 7); // YYYY-MM
+    monthly[key] = (monthly[key] || 0) + h.total;
+  });
+  const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+  const monthlyRows = Object.entries(monthly)
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1)) // most recent month first
+    .map(([key, total]) => {
+      const [y, m] = key.split("-");
+      const label = `${monthNames[parseInt(m, 10) - 1]} ${y}`;
+      return `<div class="breakdown-row">
+        <div class="breakdown-label" style="text-transform:capitalize">${label}</div>
+        <div class="num small ${total >= 0 ? "up" : "down"}" style="flex:1;text-align:right"><b>${fmtBRL(total)}</b></div>
+      </div>`;
+    })
+    .join("");
+  const monthlyHtml = Object.keys(monthly).length > 1 ? `<div class="card"><h2 class="card-title">Resumen mensual</h2>${monthlyRows}</div>` : "";
+
   const totalReturnHtml = sorted.length
     ? `<div class="card total-return-card">
         <span class="muted small">Rendimiento total desde ${firstDate}</span>
         <span class="total-return-value ${cum >= 0 ? "up" : "down"}">${cum >= 0 ? "+" : ""}${fmtBRL(cum)} (${fmtPct(totalReturnPct)})</span>
+        <button class="btn btn-ghost btn-sm" style="margin-top:10px;align-self:flex-start" data-action="compare-spx" ${hs.spxStatus === "loading" ? "disabled" : ""}>${icon("refresh", 13, hs.spxStatus === "loading" ? "spin" : "")} ${spxLabel}</button>
+        ${spxResultHtml}
       </div>`
     : "";
 
@@ -1257,6 +1381,7 @@ function renderHistorico() {
         <button class="btn btn-ghost btn-sm" data-action="clear-history">${icon("trash", 13)} ${hs.confirmClear ? "¿Confirmar borrado?" : "Borrar historial"}</button>
       </div>
       ${totalReturnHtml}
+      ${monthlyHtml}
       <div class="card">
         <h2 class="card-title">Patrimonio acumulado</h2>
         <div class="chart-wrap">${lineSvg}</div>
@@ -1461,6 +1586,96 @@ function exportBackup() {
   downloadBlob(JSON.stringify(backup, null, 2), `pnl-backup-${todayYMD()}.json`, "application/json");
 }
 
+function parseCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else cur += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { out.push(cur); cur = ""; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function importPurchasesFile(file) {
+  const p = state.posicoes;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const lines = String(reader.result).split(/\r?\n/).filter((l) => l.trim());
+      if (!lines.length) throw new Error("vacío");
+      const header = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+      const idx = {
+        symbol: header.indexOf("symbol"),
+        date: header.indexOf("date"),
+        type: header.indexOf("type"),
+        qty: header.indexOf("qty"),
+        price: header.indexOf("price"),
+      };
+      if (idx.symbol === -1 || idx.type === -1 || idx.qty === -1 || idx.price === -1) {
+        throw new Error("Faltan columnas (symbol, type, qty, price)");
+      }
+
+      const txs = lines.slice(1).map((l) => parseCsvLine(l)).filter((c) => c.length >= 4);
+      // sort chronologically so sells reduce the running average cost correctly, oldest first.
+      txs.sort((a, b) => new Date(a[idx.date]) - new Date(b[idx.date]));
+
+      const qty = {};
+      const cost = {};
+      txs.forEach((cols) => {
+        const rawSym = (cols[idx.symbol] || "").trim();
+        const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
+        if (!sym) return;
+        const type = (cols[idx.type] || "").trim().toLowerCase();
+        const q = parseNum(cols[idx.qty]);
+        const pr = parseNum(cols[idx.price]);
+        qty[sym] = qty[sym] || 0;
+        cost[sym] = cost[sym] || 0;
+        if (type === "buy") {
+          qty[sym] += q;
+          cost[sym] += q * pr;
+        } else if (type === "sell") {
+          if (qty[sym] > 0) {
+            const avg = cost[sym] / qty[sym];
+            cost[sym] -= avg * q;
+          }
+          qty[sym] -= q;
+        }
+      });
+
+      const avgCostByTicker = {};
+      Object.keys(qty).forEach((sym) => {
+        if (qty[sym] > 0.0001) avgCostByTicker[sym] = cost[sym] / qty[sym];
+      });
+
+      let matched = 0;
+      state.portfolio = state.portfolio.map((row) => {
+        const avg = avgCostByTicker[row.ticker];
+        if (typeof avg === "number" && Number.isFinite(avg)) { matched++; return { ...row, avgCost: avg }; }
+        return row;
+      });
+      persistPortfolio();
+      resetPosicoesState();
+      state.posicoes.quotesError = matched
+        ? null
+        : ["No encontré ningún ticker de ese archivo que coincida con tu carteira."];
+      state.posicoes.importPurchasesMessage = matched ? `Precio de compra actualizado para ${matched} activo(s).` : null;
+      render();
+    } catch (err) {
+      p.quotesError = ["No pude leer ese CSV. Revisa que tenga las columnas symbol, date, type, qty, price (formato de TradingView)."];
+      render();
+    }
+  };
+  reader.readAsText(file);
+}
+
 function importBackupFile(file) {
   const p = state.posicoes;
   const reader = new FileReader();
@@ -1602,11 +1817,13 @@ function handleAction(action, el) {
     case "save-positions": savePositions(); break;
     case "export-backup": exportBackup(); break;
     case "trigger-import-backup": document.getElementById("import-backup-input")?.click(); break;
+    case "trigger-import-purchases": document.getElementById("import-purchases-input")?.click(); break;
     case "fetch-quotes": fetchQuotes(); break;
     case "add-demo": addDemo(); break;
     case "import-real-history": importRealHistory(); break;
     case "export-csv": exportCsv(); break;
     case "edit-entry": startEditEntry(id); break;
+    case "compare-spx": compareSpx(); break;
     case "cancel-entry-edit": cancelEditEntry(); break;
     case "save-entry-edit": saveEntryEdit(); break;
     case "clear-history": clearHistoryAction(); break;
@@ -1687,6 +1904,10 @@ root.addEventListener("change", (e) => {
 
   if (e.target.id === "import-backup-input" && e.target.files?.[0]) {
     importBackupFile(e.target.files[0]);
+    e.target.value = "";
+  }
+  if (e.target.id === "import-purchases-input" && e.target.files?.[0]) {
+    importPurchasesFile(e.target.files[0]);
     e.target.value = "";
   }
 });
