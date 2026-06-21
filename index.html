@@ -1,14 +1,14 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>P&amp;L Diário — Carteira Internacional</title>
-<meta name="description" content="Acompanhe o resultado diário da sua carteira internacional: posições, variação do dia e histórico de P&amp;L.">
+<title>P&amp;L Diario — Cartera Internacional</title>
+<meta name="description" content="Sigue el resultado diario de tu cartera internacional: posiciones, variación del día e historial de P&amp;L.">
 <meta name="theme-color" content="#0A0D10">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="P&amp;L Diário">
+<meta name="apple-mobile-web-app-title" content="P&amp;L Diario">
 <link rel="manifest" href="./manifest.json">
 <link rel="icon" href="./icons/icon-192.png">
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
@@ -161,18 +161,18 @@ const parseNum = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-const fmtBRL = (v) => (v ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const fmtBRL = (v) => (v ?? 0).toLocaleString("es", { style: "currency", currency: "BRL" });
 
-const fmtPct = (v) => `${v >= 0 ? "+" : ""}${(v ?? 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+const fmtPct = (v) => `${v >= 0 ? "+" : ""}${(v ?? 0).toLocaleString("es", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 
 const fmtShortDate = (iso) => {
   const d = new Date(iso);
-  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+  return d.toLocaleDateString("es", { day: "2-digit", month: "2-digit" });
 };
 
 const fmtFullDate = (iso) => {
   const d = new Date(iso);
-  return `${d.toLocaleDateString("pt-BR")} · ${d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+  return `${d.toLocaleDateString("es")} · ${d.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}`;
 };
 
 const uid = () => `row-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
@@ -287,7 +287,17 @@ function persistHistory() {
 }
 
 function resetHojeState() {
-  state.hoje = { status: "idle", error: null, reviewMap: {}, fxPctInput: "0", result: null, updateSaldo: false, pasteText: "" };
+  state.hoje = {
+    status: "idle",
+    error: null,
+    reviewMap: {},
+    fxPctInput: "0",
+    result: null,
+    updateSaldo: false,
+    pasteText: "",
+    fetchStatus: "idle",
+    fetchProgressLabel: null,
+  };
 }
 function loadQuotesCache() {
   let apiKey = "", quotes = {}, fxRateInput = "", quotesUpdatedAt = null;
@@ -338,18 +348,18 @@ function timeAgoLabel(iso) {
   if (!iso) return "";
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.round(diffMs / 60000);
-  if (mins < 1) return "atualizado agora";
-  if (mins < 60) return `atualizado há ${mins} min`;
+  if (mins < 1) return "actualizado ahora";
+  if (mins < 60) return `actualizado hace ${mins} min`;
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `atualizado há ${hours}h`;
-  return `atualizado em ${fmtShortDate(iso)}`;
+  if (hours < 24) return `actualizado hace ${hours}h`;
+  return `actualizado el ${fmtShortDate(iso)}`;
 }
 
 async function fetchQuotes() {
   const p = state.posicoes;
   const apiKey = (p.apiKey || "").trim();
   if (!apiKey) {
-    p.quotesError = ["Informe sua chave de API da Twelve Data para buscar cotações (é gratuita)."];
+    p.quotesError = ["Ingresa tu clave de API de Twelve Data para buscar cotizaciones (es gratis)."];
     render();
     return;
   }
@@ -378,7 +388,7 @@ async function fetchQuotes() {
         if (typeof rate2 === "number") { p.fxRateInput = String(rate2); return; }
         throw new Error("sem dado 2");
       } catch (_2) {
-        errors.push("Não consegui obter o câmbio USD/BRL automaticamente. Digite manualmente o valor.");
+        errors.push("No pude obtener el cambio USD/BRL automáticamente. Ingrésalo manualmente.");
       }
     }
   })();
@@ -395,7 +405,7 @@ async function fetchQuotes() {
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       if (i > 0) {
-        p.quotesProgressLabel = `Aguardando ~1 min (limite do plano gratuito)… grupo ${i + 1}/${chunks.length}`;
+        p.quotesProgressLabel = `Esperando ~1 min (límite del plan gratis)… grupo ${i + 1}/${chunks.length}`;
         render();
         await new Promise((r) => setTimeout(r, 61000)); // stay under the per-minute credit cap
       }
@@ -406,20 +416,20 @@ async function fetchQuotes() {
         const resp = await fetch(url);
         const data = await resp.json();
         if (data && data.status === "error") {
-          errors.push(data.message || "Erro ao buscar preços na Twelve Data.");
+          errors.push(data.message || "Error al buscar precios en Twelve Data.");
           continue;
         }
         const shaped = chunk.length === 1 ? { [chunk[0]]: data } : data;
         Object.entries(shaped || {}).forEach(([sym, val]) => {
           if (!val || typeof val !== "object" || val.status === "error" || !val.price) {
-            errors.push(`Sem cotação para ${sym}.`);
+            errors.push(`Sin cotización para ${sym}.`);
             return;
           }
           const num = parseFloat(val.price);
           if (Number.isFinite(num)) newQuotes[sym] = num;
         });
       } catch (err) {
-        errors.push("Não consegui buscar preços na Twelve Data (sem conexão).");
+        errors.push("No pude buscar precios en Twelve Data (sin conexión).");
       }
     }
     p.quotesProgressLabel = null;
@@ -538,16 +548,22 @@ function renderHoje() {
   let inner = "";
 
   if (h.status === "idle") {
+    const fetchLabel = h.fetchStatus === "loading" ? (h.fetchProgressLabel || "Buscando…") : "Buscar variación automáticamente";
     inner = `
       <div class="card upload-card">
         ${h.error ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(h.error)}</div>` : ""}
         ${icon("camera", 28, "muted")}
-        <p class="upload-text">Registre a variação de hoje colando os números que você já tem (do app da corretora, e-mail ou Google), ou preenchendo manualmente.</p>
-        <textarea class="paste-area" data-bind="paste" placeholder="Cole aqui: PG:0.86 KO:0.11 WMB:0.64 USB:2.27 TM:0 ARCC:1.00 ARKB:0 USDBRL:-0.73">${escapeHtml(h.pasteText)}</textarea>
-        <button class="btn btn-primary" data-action="parse-pasted" ${h.pasteText.trim() ? "" : "disabled"}>Processar dados colados</button>
-        <p class="upload-hint">Dica: copie os percentuais de variação do dia de cada ativo e do dólar (USDBRL) e cole tudo de uma vez.</p>
-        <div class="divider-text">ou</div>
-        <button class="btn btn-ghost" data-action="start-manual">${icon("pencil", 15)} Preencher manualmente</button>
+        <p class="upload-text">Registra la variación de hoy buscando las cotizaciones automáticamente, pegando los números que ya tienes, o llenando manualmente.</p>
+        <button class="btn btn-primary" data-action="fetch-live-day-change" ${h.fetchStatus === "loading" ? "disabled" : ""}>
+          ${icon("refresh", 15, h.fetchStatus === "loading" ? "spin" : "")} ${fetchLabel}
+        </button>
+        <p class="upload-hint">Usa la misma clave de API de Twelve Data configurada en la pestaña Posiciones.</p>
+        <div class="divider-text">o</div>
+        <textarea class="paste-area" data-bind="paste" placeholder="Pega aquí: PG:0.86 KO:0.11 WMB:0.64 USB:2.27 TM:0 ARCC:1.00 ARKB:0 USDBRL:-0.73">${escapeHtml(h.pasteText)}</textarea>
+        <button class="btn btn-primary" data-action="parse-pasted" ${h.pasteText.trim() ? "" : "disabled"}>Procesar datos pegados</button>
+        <p class="upload-hint">Consejo: copia los porcentajes de variación del día de cada activo y del dólar (USDBRL) y pega todo de una vez.</p>
+        <div class="divider-text">o</div>
+        <button class="btn btn-ghost" data-action="start-manual">${icon("pencil", 15)} Llenar manualmente</button>
       </div>`;
   } else if (h.status === "review" || h.status === "result") {
     inner = renderHojeReviewResult();
@@ -555,8 +571,8 @@ function renderHoje() {
     inner = `
       <div class="card center-card">
         ${icon("check-circle", 28, "up")}
-        <p>Resultado de hoje salvo no histórico.</p>
-        <button class="btn btn-primary" data-action="new-entry">Novo lançamento</button>
+        <p>Resultado de hoy guardado en el historial.</p>
+        <button class="btn btn-primary" data-action="new-entry">Nuevo registro</button>
       </div>`;
   }
 
@@ -594,11 +610,11 @@ function renderHojeReviewResult() {
 
   const tableHtml = `
     <table class="table">
-      <thead><tr><th>Ativo</th><th class="num">% dia</th>${h.status === "result" ? '<th class="num">Resultado</th>' : ""}</tr></thead>
+      <thead><tr><th>Activo</th><th class="num">% día</th>${h.status === "result" ? '<th class="num">Resultado</th>' : ""}</tr></thead>
       <tbody>
         ${rowsHtml}
         <tr class="row-fx">
-          <td><b>USD/BRL</b><span class="muted small"> · câmbio do dia</span></td>
+          <td><b>USD/BRL</b><span class="muted small"> · cambio del día</span></td>
           <td class="num">${fxPctCell}</td>
           ${fxGainCell}
         </tr>
@@ -616,23 +632,23 @@ function renderHojeReviewResult() {
     const r = h.result;
     footer = `
       <div class="summary">
-        <div class="summary-line"><span>Variação por preços</span><span class="${r.priceTotal >= 0 ? "up" : "down"}">${fmtBRL(r.priceTotal)}</span></div>
-        <div class="summary-line"><span>Efeito dólar (${fmtPct(r.fxPct)})</span><span class="${r.fxGain >= 0 ? "up" : "down"}">${fmtBRL(r.fxGain)}</span></div>
+        <div class="summary-line"><span>Variación por precios</span><span class="${r.priceTotal >= 0 ? "up" : "down"}">${fmtBRL(r.priceTotal)}</span></div>
+        <div class="summary-line"><span>Efecto dólar (${fmtPct(r.fxPct)})</span><span class="${r.fxGain >= 0 ? "up" : "down"}">${fmtBRL(r.fxGain)}</span></div>
         <div class="summary-line summary-total"><span>Total estimado</span><span class="${r.total >= 0 ? "up" : "down"}">${fmtBRL(r.total)}</span></div>
       </div>
       <label class="checkbox-row">
         <input type="checkbox" data-bind="updateSaldo" ${h.updateSaldo ? "checked" : ""}>
-        Atualizar saldo base de cada posição com o resultado de hoje
+        Actualizar saldo base de cada posición con el resultado de hoy
       </label>
       <div class="row-actions">
         <button class="btn btn-ghost" data-action="discard-result">Descartar</button>
-        <button class="btn btn-primary" data-action="save-history">${icon("save", 15)} Salvar no histórico</button>
+        <button class="btn btn-primary" data-action="save-history">${icon("save", 15)} Guardar en el historial</button>
       </div>`;
   }
 
   return `<div class="card">
     ${errorBanner}
-    <div class="card-title-row"><h2 class="card-title">Variação do dia por ativo</h2>${headerExtra}</div>
+    <div class="card-title-row"><h2 class="card-title">Variación del día por activo</h2>${headerExtra}</div>
     ${tableHtml}
     ${footer}
   </div>`;
@@ -648,6 +664,74 @@ function startManual() {
   render();
 }
 
+async function fetchLiveDayChange() {
+  const h = state.hoje;
+  const apiKey = (state.posicoes.apiKey || "").trim();
+  if (!apiKey) {
+    h.error = "Configura tu clave de API de Twelve Data en la pestaña Posiciones primero.";
+    render();
+    return;
+  }
+  h.fetchStatus = "loading";
+  h.error = null;
+  render();
+
+  const tickers = [...new Set(state.portfolio.map((p) => p.ticker).filter(Boolean))];
+  const symbols = [...tickers, "USD/BRL"];
+  const errors = [];
+  const pctByTicker = {};
+  let fxPct = null;
+
+  const CHUNK_SIZE = 8;
+  const chunks = [];
+  for (let i = 0; i < symbols.length; i += CHUNK_SIZE) chunks.push(symbols.slice(i, i + CHUNK_SIZE));
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (i > 0) {
+      h.fetchProgressLabel = `Esperando ~1 min (límite del plan gratis)… grupo ${i + 1}/${chunks.length}`;
+      render();
+      await new Promise((r) => setTimeout(r, 61000));
+    }
+    h.fetchProgressLabel = chunks.length > 1 ? `Buscando grupo ${i + 1}/${chunks.length}…` : null;
+    render();
+    try {
+      const url = `https://api.twelvedata.com/quote?symbol=${chunk.join(",")}&apikey=${encodeURIComponent(apiKey)}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (data && data.status === "error") {
+        errors.push(data.message || "Error al buscar la variación en Twelve Data.");
+        continue;
+      }
+      const shaped = chunk.length === 1 ? { [chunk[0]]: data } : data;
+      Object.entries(shaped || {}).forEach(([sym, val]) => {
+        const pct = parseFloat(val?.percent_change);
+        if (!val || val.status === "error" || !Number.isFinite(pct)) {
+          errors.push(`Sin variación para ${sym}.`);
+          return;
+        }
+        if (sym === "USD/BRL") fxPct = pct;
+        else pctByTicker[sym] = pct;
+      });
+    } catch (err) {
+      errors.push("No pude buscar la variación en Twelve Data (sin conexión).");
+    }
+  }
+  h.fetchProgressLabel = null;
+
+  const map = {};
+  state.portfolio.forEach((p) => {
+    const v = pctByTicker[p.ticker];
+    map[p.id] = typeof v === "number" ? String(v) : "0";
+  });
+  h.reviewMap = map;
+  h.fxPctInput = fxPct !== null ? String(fxPct) : "0";
+  h.error = errors.length ? errors.join(" ") : null;
+  h.fetchStatus = "idle";
+  h.status = "review";
+  render();
+}
+
 function parsePasted() {
   const text = state.hoje.pasteText;
   const regex = /([A-Za-zÀ-ÿ\/]{2,12})\s*[:=]\s*([+-]?\d+(?:[.,]\d+)?)\s*%?/g;
@@ -655,7 +739,7 @@ function parsePasted() {
   let m;
   while ((m = regex.exec(text)) !== null) found[m[1].toUpperCase()] = parseNum(m[2]);
   if (!Object.keys(found).length) {
-    state.hoje.error = "Não consegui reconhecer nenhum valor nesse texto. Confira o formato e tente de novo.";
+    state.hoje.error = "No pude reconocer ningún valor en ese texto. Revisa el formato e intenta de nuevo.";
     render();
     return;
   }
@@ -762,7 +846,7 @@ function renderPosicoes() {
         <td class="num"><input class="input-cell" inputmode="decimal" data-bind="quantity" data-id="${r.id}" value="${escapeAttr(r.quantity)}"></td>
         <td class="num"><input class="input-cell" inputmode="decimal" data-bind="price" data-id="${r.id}" value="${escapeAttr(r.price)}" placeholder="0,00"></td>
         <td class="num" id="value-cell-${r.id}">${valueCell}</td>
-        <td><button class="icon-btn" data-action="remove-row" data-id="${r.id}" title="Remover">${icon("trash", 14)}</button></td>
+        <td><button class="icon-btn" data-action="remove-row" data-id="${r.id}" title="Eliminar">${icon("trash", 14)}</button></td>
       </tr>`;
     })
     .join("");
@@ -771,7 +855,7 @@ function renderPosicoes() {
     <div class="stack">
       <div class="card">
         <div class="card-title-row">
-          <h2 class="card-title">Cotações automáticas</h2>
+          <h2 class="card-title">Cotizaciones automáticas</h2>
         </div>
         ${p.quotesError ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${
           p.quotesError.length > 1
@@ -780,34 +864,34 @@ function renderPosicoes() {
         }</div>` : ""}
         <div class="quotes-bar">
           <div class="quotes-fx">
-            <span class="muted small">Câmbio USD/BRL</span>
+            <span class="muted small">Cambio USD/BRL</span>
             <input class="input-cell input-fx" inputmode="decimal" data-bind="fxRate" value="${escapeAttr(p.fxRateInput)}" placeholder="0,00">
           </div>
           <button class="btn btn-ghost btn-sm" data-action="fetch-quotes" ${p.quotesStatus === "loading" ? "disabled" : ""}>
-            ${icon("refresh", 13, p.quotesStatus === "loading" ? "spin" : "")} ${p.quotesStatus === "loading" ? (p.quotesProgressLabel || "Buscando…") : "Atualizar cotações"}
+            ${icon("refresh", 13, p.quotesStatus === "loading" ? "spin" : "")} ${p.quotesStatus === "loading" ? (p.quotesProgressLabel || "Buscando…") : "Actualizar cotizaciones"}
           </button>
         </div>
-        <p class="quotes-updated small muted">${p.quotesUpdatedAt ? timeAgoLabel(p.quotesUpdatedAt) : "ainda não buscado"}</p>
+        <p class="quotes-updated small muted">${p.quotesUpdatedAt ? timeAgoLabel(p.quotesUpdatedAt) : "aún no buscado"}</p>
         <div class="api-key-row">
-          <input class="input-cell input-apikey" data-bind="apiKey" value="${escapeAttr(p.apiKey)}" placeholder="Chave de API Twelve Data">
-          <a class="muted small" href="https://twelvedata.com/pricing" target="_blank" rel="noopener">Criar chave gratuita ↗</a>
+          <input class="input-cell input-apikey" data-bind="apiKey" value="${escapeAttr(p.apiKey)}" placeholder="Clave de API de Twelve Data">
+          <a class="muted small" href="https://twelvedata.com/pricing" target="_blank" rel="noopener">Crear clave gratis ↗</a>
         </div>
-        <p class="upload-hint">O preço (US$) de cada posição é preenchido automaticamente ao atualizar as cotações, mas você pode digitar por cima se quiser. Sem preço e câmbio, o valor volta a ser editável manualmente.</p>
-        <p class="upload-hint">O plano gratuito da Twelve Data permite 8 ações por minuto. Com mais de 8 tickers diferentes, a busca continua automaticamente após esperar 1 minuto entre grupos.</p>
+        <p class="upload-hint">El precio (US$) de cada posición se completa automáticamente al actualizar las cotizaciones, pero puedes escribir encima si quieres. Sin precio y cambio, el valor vuelve a ser editable manualmente.</p>
+        <p class="upload-hint">El plan gratuito de Twelve Data permite 8 acciones por minuto. Con más de 8 tickers distintos, la búsqueda continúa automáticamente después de esperar 1 minuto entre grupos.</p>
       </div>
 
       <div class="card">
         <div class="card-title-row">
-          <h2 class="card-title">Posições da carteira</h2>
+          <h2 class="card-title">Posiciones de la cartera</h2>
           <span class="muted small" id="live-total">${fmtBRL(liveTotal)}</span>
         </div>
         <table class="table table-editable">
-          <thead><tr><th>Ticker</th><th>Corretora</th><th class="num">Qtd.</th><th class="num">Preço (US$)</th><th class="num">Valor (R$)</th><th></th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Broker</th><th class="num">Cant.</th><th class="num">Precio (US$)</th><th class="num">Valor (R$)</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
         <div class="row-actions">
-          <button class="btn btn-ghost" data-action="add-row">${icon("plus", 15)} Adicionar posição</button>
-          <button class="btn btn-primary" data-action="save-positions" ${state.posicoes.dirty ? "" : "disabled"}>${icon("save", 15)} Salvar posições</button>
+          <button class="btn btn-ghost" data-action="add-row">${icon("plus", 15)} Agregar posición</button>
+          <button class="btn btn-primary" data-action="save-positions" ${state.posicoes.dirty ? "" : "disabled"}>${icon("save", 15)} Guardar posiciones</button>
         </div>
       </div>
     </div>`;
@@ -849,7 +933,7 @@ function savePositions() {
 
 function renderHistorico() {
   const hs = state.historico;
-  const importBtnLabel = hs.importStatus === "loading" ? (hs.importProgressLabel || "Buscando…") : "Importar histórico real (14 dias)";
+  const importBtnLabel = hs.importStatus === "loading" ? (hs.importProgressLabel || "Buscando…") : "Importar historial real (14 días)";
   const importBanner = hs.importError
     ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${
         hs.importError.length > 1 ? `<ul class="error-list">${hs.importError.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>` : escapeHtml(hs.importError[0])
@@ -861,13 +945,13 @@ function renderHistorico() {
   if (!state.history.length) {
     return `
       <div class="card empty-state">
-        <p>Nenhum resultado salvo ainda.</p>
-        <p class="muted small">Calcule o resultado de hoje na aba "Hoje" e salve para começar o histórico, importe os últimos dias reais, ou experimente a app com dados fictícios.</p>
+        <p>Todavía no hay resultados guardados.</p>
+        <p class="muted small">Calcula el resultado de hoy en la pestaña "Hoy" y guárdalo para empezar el historial, importa los últimos días reales, o prueba la app con datos ficticios.</p>
         ${importBanner}
         <button class="btn btn-primary" style="margin-top:14px" data-action="import-real-history" ${hs.importStatus === "loading" ? "disabled" : ""}>
           ${icon("refresh", 15, hs.importStatus === "loading" ? "spin" : "")} ${importBtnLabel}
         </button>
-        <button class="btn btn-ghost" style="margin-top:8px" data-action="add-demo">${icon("sparkles", 15)} Gerar dados de teste (14 dias)</button>
+        <button class="btn btn-ghost" style="margin-top:8px" data-action="add-demo">${icon("sparkles", 15)} Generar datos de prueba (14 días)</button>
       </div>`;
   }
 
@@ -890,7 +974,7 @@ function renderHistorico() {
         <td class="num small ${h.priceTotal >= 0 ? "up" : "down"}">${fmtBRL(h.priceTotal)}</td>
         <td class="num small ${h.fxGain >= 0 ? "up" : "down"}">${fmtBRL(h.fxGain)}</td>
         <td class="num ${h.total >= 0 ? "up" : "down"}"><b>${fmtBRL(h.total)}</b></td>
-        <td><button class="icon-btn" data-action="remove-entry" data-id="${h.id}" title="Remover lançamento">${icon("trash", 14)}</button></td>
+        <td><button class="icon-btn" data-action="remove-entry" data-id="${h.id}" title="Eliminar registro">${icon("trash", 14)}</button></td>
       </tr>`
     )
     .join("");
@@ -902,21 +986,21 @@ function renderHistorico() {
         <button class="btn btn-ghost btn-sm" data-action="import-real-history" ${hs.importStatus === "loading" ? "disabled" : ""}>
           ${icon("refresh", 13, hs.importStatus === "loading" ? "spin" : "")} ${importBtnLabel}
         </button>
-        <button class="btn btn-ghost btn-sm" data-action="add-demo">${icon("sparkles", 13)} Gerar mais dados de teste</button>
-        <button class="btn btn-ghost btn-sm" data-action="clear-history">${icon("trash", 13)} ${hs.confirmClear ? "Confirmar limpeza?" : "Limpar histórico"}</button>
+        <button class="btn btn-ghost btn-sm" data-action="add-demo">${icon("sparkles", 13)} Generar más datos de prueba</button>
+        <button class="btn btn-ghost btn-sm" data-action="clear-history">${icon("trash", 13)} ${hs.confirmClear ? "¿Confirmar borrado?" : "Borrar historial"}</button>
       </div>
       <div class="card">
-        <h2 class="card-title">Patrimônio acumulado</h2>
+        <h2 class="card-title">Patrimonio acumulado</h2>
         <div class="chart-wrap">${lineSvg}</div>
       </div>
       <div class="card">
-        <h2 class="card-title">Resultado por dia</h2>
+        <h2 class="card-title">Resultado por día</h2>
         <div class="chart-wrap">${barSvg}</div>
       </div>
       <div class="card">
-        <h2 class="card-title">Lançamentos</h2>
+        <h2 class="card-title">Registros</h2>
         <table class="table">
-          <thead><tr><th>Data</th><th class="num">Preços</th><th class="num">Câmbio</th><th class="num">Total</th><th></th></tr></thead>
+          <thead><tr><th>Fecha</th><th class="num">Precios</th><th class="num">Cambio</th><th class="num">Total</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
@@ -934,7 +1018,7 @@ async function importRealHistory() {
   const h = state.historico;
   const apiKey = (state.posicoes.apiKey || "").trim();
   if (!apiKey) {
-    h.importError = ["Configure sua chave de API da Twelve Data na aba Posições primeiro."];
+    h.importError = ["Configura tu clave de API de Twelve Data en la pestaña Posiciones primero."];
     render();
     return;
   }
@@ -944,17 +1028,19 @@ async function importRealHistory() {
   render();
 
   const tickers = [...new Set(state.portfolio.map((p) => p.ticker).filter(Boolean))];
+  const symbols = [...tickers, "USD/BRL"];
   const errors = [];
   const tickerCloses = {}; // ticker -> { 'YYYY-MM-DD': closePrice }
+  const fxRates = {}; // 'YYYY-MM-DD' -> rate
 
   const CHUNK_SIZE = 8;
   const chunks = [];
-  for (let i = 0; i < tickers.length; i += CHUNK_SIZE) chunks.push(tickers.slice(i, i + CHUNK_SIZE));
+  for (let i = 0; i < symbols.length; i += CHUNK_SIZE) chunks.push(symbols.slice(i, i + CHUNK_SIZE));
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     if (i > 0) {
-      h.importProgressLabel = `Aguardando ~1 min (limite do plano gratuito)… grupo ${i + 1}/${chunks.length}`;
+      h.importProgressLabel = `Esperando ~1 min (límite del plan gratis)… grupo ${i + 1}/${chunks.length}`;
       render();
       await new Promise((r) => setTimeout(r, 61000));
     }
@@ -965,42 +1051,26 @@ async function importRealHistory() {
       const resp = await fetch(url);
       const data = await resp.json();
       if (data && data.status === "error") {
-        errors.push(data.message || "Erro ao buscar histórico na Twelve Data.");
+        errors.push(data.message || "Error al buscar histórico en Twelve Data.");
         continue;
       }
       const shaped = chunk.length === 1 ? { [chunk[0]]: data } : data;
       Object.entries(shaped || {}).forEach(([sym, val]) => {
-        if (!val || !Array.isArray(val.values)) { errors.push(`Sem histórico para ${sym}.`); return; }
+        if (!val || !Array.isArray(val.values)) { errors.push(`Sin histórico para ${sym}.`); return; }
         const map = {};
         val.values.forEach((v) => {
           const d = String(v.datetime).slice(0, 10);
           const close = parseFloat(v.close);
           if (Number.isFinite(close)) map[d] = close;
         });
-        tickerCloses[sym] = map;
+        if (sym === "USD/BRL") Object.assign(fxRates, map);
+        else tickerCloses[sym] = map;
       });
     } catch (err) {
-      errors.push("Não consegui buscar histórico na Twelve Data (sem conexão).");
+      errors.push("No pude buscar histórico en Twelve Data (sin conexión).");
     }
   }
   h.importProgressLabel = null;
-
-  // FX history via Frankfurter (date range). If it fails, ticker data is still imported,
-  // just with câmbio = 0% on every imported day (editable later, same as any other entry).
-  const fxRates = {};
-  try {
-    const end = new Date();
-    const start = new Date(end.getTime() - 18 * 86400000);
-    const fmt = (d) => d.toISOString().slice(0, 10);
-    const url = `https://api.frankfurter.app/${fmt(start)}..${fmt(end)}?from=USD&to=BRL`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    Object.entries(data?.rates || {}).forEach(([d, v]) => {
-      if (typeof v?.BRL === "number") fxRates[d] = v.BRL;
-    });
-  } catch (err) {
-    errors.push("Não consegui buscar o histórico do câmbio USD/BRL.");
-  }
 
   // Day-over-day % change, computed within each series' own trading calendar.
   const tickerChangePct = {};
@@ -1051,10 +1121,10 @@ async function importRealHistory() {
   h.importStatus = "idle";
   h.importError = errors.length ? errors : null;
   h.importMessage = newEntries.length
-    ? `${newEntries.length} dia(s) importado(s) com dados reais.`
+    ? `${newEntries.length} día(s) importado(s) con datos reales.`
     : errors.length
     ? null
-    : "Nenhum dia novo para importar (esses dias já estavam no histórico).";
+    : "No hay días nuevos para importar (esos días ya estaban en el historial).";
   render();
 }
 
@@ -1098,8 +1168,8 @@ function render() {
       <header class="header">
         <div class="header-top">
           <div>
-            <div class="brand-eyebrow">CARTEIRA INTERNACIONAL</div>
-            <h1 class="brand-title">P&amp;L Diário</h1>
+            <div class="brand-eyebrow">CARTERA INTERNACIONAL</div>
+            <h1 class="brand-title">P&amp;L Diario</h1>
           </div>
           <div class="header-right">
             <button class="install-pill" id="install-btn" data-action="install-app" hidden>${icon("download", 13)} Instalar app</button>
@@ -1113,9 +1183,9 @@ function render() {
       </header>
 
       <nav class="tabbar">
-        <button class="tab ${state.tab === "hoje" ? "tab-active" : ""}" data-action="switch-tab" data-tab="hoje">${icon("wallet", 15)} Hoje</button>
-        <button class="tab ${state.tab === "posicoes" ? "tab-active" : ""}" data-action="switch-tab" data-tab="posicoes">${icon("list-checks", 15)} Posições</button>
-        <button class="tab ${state.tab === "historico" ? "tab-active" : ""}" data-action="switch-tab" data-tab="historico">${icon("history", 15)} Histórico</button>
+        <button class="tab ${state.tab === "hoje" ? "tab-active" : ""}" data-action="switch-tab" data-tab="hoje">${icon("wallet", 15)} Hoy</button>
+        <button class="tab ${state.tab === "posicoes" ? "tab-active" : ""}" data-action="switch-tab" data-tab="posicoes">${icon("list-checks", 15)} Posiciones</button>
+        <button class="tab ${state.tab === "historico" ? "tab-active" : ""}" data-action="switch-tab" data-tab="historico">${icon("history", 15)} Historial</button>
       </nav>
 
       <main class="main">
@@ -1134,6 +1204,7 @@ function handleAction(action, el) {
   switch (action) {
     case "switch-tab": switchTab(el.dataset.tab); break;
     case "start-manual": startManual(); break;
+    case "fetch-live-day-change": fetchLiveDayChange(); break;
     case "parse-pasted": parsePasted(); break;
     case "edit-review": state.hoje.status = "review"; render(); break;
     case "cancel-review": resetHojeState(); render(); break;
