@@ -1035,9 +1035,13 @@ async function importRealHistory() {
         try {
           const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(sym)}&resolution=D&from=${fromUnix}&to=${toUnix}&token=${encodeURIComponent(finnhubKey)}`;
           const resp = await fetch(url);
-          const data = await resp.json();
+          const data = await resp.json().catch(() => null);
+          if (!resp.ok) {
+            errors.push(`${sym}: HTTP ${resp.status}${data?.error ? " — " + data.error : ""}.`);
+            return;
+          }
           if (data?.s !== "ok" || !Array.isArray(data.c) || !Array.isArray(data.t)) {
-            errors.push(`Sin histórico para ${sym}.`);
+            errors.push(`Sin histórico para ${sym} (estado: ${data?.s ?? data?.error ?? "desconocido"}).`);
             return;
           }
           const map = {};
