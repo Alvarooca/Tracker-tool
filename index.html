@@ -16,7 +16,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body { margin: 0; padding: 0; background: #0A0D10; }
 
 .app {
   background: #0A0D10;
@@ -71,12 +71,18 @@ html, body { margin: 0; padding: 0; }
 .btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
 .icon-btn { background: transparent; border: none; color: #7A8290; cursor: pointer; padding: 4px; display: inline-flex; }
 .icon-btn:hover { color: #FF6B6B; }
+.move-cell { display: flex; flex-direction: column; gap: 2px; }
+.move-btn { padding: 2px; }
+.move-btn:hover { color: #E8B339; }
+.move-btn:disabled { opacity: 0.25; cursor: default; }
+.move-btn:disabled:hover { color: #7A8290; }
 
 .row-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 .toolbar-row { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .btn-sm { padding: 6px 11px; font-size: 11.5px; }
 
-.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table { min-width: 100%; border-collapse: collapse; font-size: 13px; }
+.table-scroll { overflow-x: auto; max-width: 100%; }
 .table th { text-align: left; color: #7A8290; font-weight: 500; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; padding: 6px 6px; border-bottom: 1px solid #1C2128; }
 .table td { padding: 9px 6px; border-bottom: 1px solid #161A20; font-family: 'IBM Plex Mono', monospace; }
 .table td:first-child { font-family: 'Inter', sans-serif; }
@@ -112,6 +118,8 @@ html, body { margin: 0; padding: 0; }
 .avatar-img { border-radius: 50%; object-fit: cover; vertical-align: middle; flex-shrink: 0; background: #fff; }
 .avatar-fallback { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; color: #0A0D10; font-weight: 700; font-family: 'Space Grotesk', sans-serif; vertical-align: middle; flex-shrink: 0; }
 .ticker-cell { display: flex; align-items: center; gap: 8px; }
+.ticker-cell .avatar-img, .ticker-cell .avatar-fallback { flex-shrink: 0; }
+.ticker-cell input.input-cell { width: 64px; flex: 1 1 64px; min-width: 50px; }
 
 .quotes-bar { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .quotes-fx { display: flex; flex-direction: column; gap: 4px; min-width: 110px; }
@@ -253,6 +261,8 @@ const ICON_PATHS = {
   sparkles: '<path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z"/><path d="M19 14l.6 1.8 1.8.6-1.8.6L19 19l-.6-1.8-1.8-.6 1.8-.6z"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13.5" r="3.5"/>',
   download: '<path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/>',
+  "chevron-up": '<path d="M5 15l7-7 7 7"/>',
+  "chevron-down": '<path d="M5 9l7 7 7-7"/>',
 };
 
 function icon(name, size = 15, cls = "") {
@@ -362,8 +372,17 @@ function persistQuotesCache() {
 
 function resetPosicoesState() {
   const cache = loadQuotesCache();
+  const fx = parseNum(cache.fxRateInput);
+  const weightOf = (p) => {
+    const price = typeof p.price === "number" || typeof p.price === "string" ? parseNum(p.price) : parseNum(cache.quotes[p.ticker] ?? "");
+    if (fx && price) return parseNum(p.quantity) * price * fx;
+    return parseNum(p.saldo) || 0;
+  };
+  const rows = state.portfolio
+    .map((p) => ({ ...p, price: typeof p.price === "number" || typeof p.price === "string" ? p.price : (cache.quotes[p.ticker] ?? "") }))
+    .sort((a, b) => weightOf(b) - weightOf(a)); // descending: biggest position first — only on first load of the tab, after that manual ↑↓ takes over
   state.posicoes = {
-    rows: state.portfolio.map((p) => ({ ...p, price: typeof p.price === "number" || typeof p.price === "string" ? p.price : (cache.quotes[p.ticker] ?? "") })),
+    rows,
     dirty: false,
     apiKey: cache.apiKey,
     finnhubKey: cache.finnhubKey,
@@ -616,7 +635,7 @@ function renderHoje() {
 
 function renderHojeReviewResult() {
   const h = state.hoje;
-  const portfolio = [...state.portfolio].sort((a, b) => parseNum(a.saldo) - parseNum(b.saldo));
+  const portfolio = [...state.portfolio].sort((a, b) => parseNum(b.saldo) - parseNum(a.saldo));
 
   const rowsHtml = portfolio
     .map((p) => {
@@ -644,7 +663,7 @@ function renderHojeReviewResult() {
   const headerExtra = h.status === "result" ? `<button class="icon-btn" data-action="edit-review" title="Editar valores">${icon("pencil", 14)}</button>` : "";
 
   const tableHtml = `
-    <table class="table">
+    <div class="table-scroll"><table class="table">
       <thead><tr><th>Activo</th><th class="num">% día</th>${h.status === "result" ? '<th class="num">Resultado</th>' : ""}</tr></thead>
       <tbody>
         ${rowsHtml}
@@ -654,7 +673,7 @@ function renderHojeReviewResult() {
           ${fxGainCell}
         </tr>
       </tbody>
-    </table>`;
+    </table></div>`;
 
   let footer = "";
   if (h.status === "review") {
@@ -875,12 +894,11 @@ function updateLiveTotal() {
 function renderPosicoes() {
   const p = state.posicoes;
   const rows = p.rows;
-  const displayRows = [...rows].sort((a, b) => rowEffectiveValue(a) - rowEffectiveValue(b));
   const liveTotal = rows.reduce((s, r) => s + rowEffectiveValue(r), 0);
   const fx = parseNum(p.fxRateInput);
 
-  const rowsHtml = displayRows
-    .map((r) => {
+  const rowsHtml = rows
+    .map((r, i) => {
       const computed = rowComputedValue(r);
       const valueCell =
         computed !== null
@@ -888,6 +906,12 @@ function renderPosicoes() {
           : `<input class="input-cell" inputmode="decimal" data-bind="saldo" data-id="${r.id}" value="${escapeAttr(r.saldo)}">`;
       return `
       <tr>
+        <td>
+          <div class="move-cell">
+            <button class="icon-btn move-btn" data-action="move-row-up" data-id="${r.id}" title="Subir" ${i === 0 ? "disabled" : ""}>${icon("chevron-up", 14)}</button>
+            <button class="icon-btn move-btn" data-action="move-row-down" data-id="${r.id}" title="Bajar" ${i === rows.length - 1 ? "disabled" : ""}>${icon("chevron-down", 14)}</button>
+          </div>
+        </td>
         <td><div class="ticker-cell">${avatarHtml(r.ticker, p.logos?.[r.ticker], 22)}<input class="input-cell" data-bind="ticker" data-id="${r.id}" value="${escapeAttr(r.ticker)}" placeholder="PG"></div></td>
         <td><input class="input-cell" data-bind="broker" data-id="${r.id}" value="${escapeAttr(r.broker)}" placeholder="Nomad"></td>
         <td class="num"><input class="input-cell" inputmode="decimal" data-bind="quantity" data-id="${r.id}" value="${escapeAttr(r.quantity)}"></td>
@@ -936,10 +960,10 @@ function renderPosicoes() {
           <h2 class="card-title">Posiciones de la cartera</h2>
           <span class="muted small" id="live-total">${fmtBRL(liveTotal)}</span>
         </div>
-        <table class="table table-editable">
-          <thead><tr><th>Ticker</th><th>Broker</th><th class="num">Cant.</th><th class="num">Precio (US$)</th><th class="num">Valor (R$)</th><th></th></tr></thead>
+        <div class="table-scroll"><table class="table table-editable">
+          <thead><tr><th></th><th>Ticker</th><th>Broker</th><th class="num">Cant.</th><th class="num">Precio (US$)</th><th class="num">Valor (R$)</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
-        </table>
+        </table></div>
         <div class="row-actions">
           <button class="btn btn-ghost" data-action="add-row">${icon("plus", 15)} Agregar posición</button>
           <button class="btn btn-primary" data-action="save-positions" ${state.posicoes.dirty ? "" : "disabled"}>${icon("save", 15)} Guardar posiciones</button>
@@ -956,6 +980,16 @@ function addRow() {
 
 function removeRow(id) {
   state.posicoes.rows = state.posicoes.rows.filter((r) => r.id !== id);
+  state.posicoes.dirty = true;
+  render();
+}
+
+function moveRow(id, direction) {
+  const rows = state.posicoes.rows;
+  const i = rows.findIndex((r) => r.id === id);
+  const j = i + direction;
+  if (i === -1 || j < 0 || j >= rows.length) return;
+  [rows[i], rows[j]] = [rows[j], rows[i]];
   state.posicoes.dirty = true;
   render();
 }
@@ -1050,10 +1084,10 @@ function renderHistorico() {
       </div>
       <div class="card">
         <h2 class="card-title">Registros</h2>
-        <table class="table">
+        <div class="table-scroll"><table class="table">
           <thead><tr><th>Fecha</th><th class="num">Precios</th><th class="num">Cambio</th><th class="num">Total</th><th></th></tr></thead>
           <tbody>${rowsHtml}</tbody>
-        </table>
+        </table></div>
       </div>
     </div>`;
 }
@@ -1291,6 +1325,8 @@ function handleAction(action, el) {
     case "new-entry": resetHojeState(); render(); break;
     case "add-row": addRow(); break;
     case "remove-row": removeRow(id); break;
+    case "move-row-up": moveRow(id, -1); break;
+    case "move-row-down": moveRow(id, 1); break;
     case "save-positions": savePositions(); break;
     case "fetch-quotes": fetchQuotes(); break;
     case "add-demo": addDemo(); break;
