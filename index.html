@@ -99,6 +99,9 @@ html, body { margin: 0; padding: 0; }
 
 .banner { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
 .banner-warn { background: rgba(232, 179, 57, 0.1); color: #E8B339; border: 1px solid rgba(232, 179, 57, 0.25); }
+.error-list { margin: 0; padding-left: 18px; }
+.error-list li { margin-bottom: 4px; }
+.error-list li:last-child { margin-bottom: 0; }
 
 .empty-state { text-align: center; color: #7A8290; padding: 30px 16px; }
 
@@ -345,7 +348,7 @@ async function fetchQuotes() {
   const p = state.posicoes;
   const apiKey = (p.apiKey || "").trim();
   if (!apiKey) {
-    p.quotesError = "Informe sua chave de API da Twelve Data para buscar cotações (é gratuita).";
+    p.quotesError = ["Informe sua chave de API da Twelve Data para buscar cotações (é gratuita)."];
     render();
     return;
   }
@@ -412,7 +415,7 @@ async function fetchQuotes() {
 
   p.quotes = newQuotes;
   p.quotesUpdatedAt = new Date().toISOString();
-  p.quotesError = errors.length ? errors.join(" ") : null;
+  p.quotesError = errors.length ? errors : null;
   p.rows = p.rows.map((r) => ({ ...r, price: typeof newQuotes[r.ticker] === "number" ? newQuotes[r.ticker] : r.price }));
   persistQuotesCache();
 
@@ -756,7 +759,11 @@ function renderPosicoes() {
         <div class="card-title-row">
           <h2 class="card-title">Cotações automáticas</h2>
         </div>
-        ${p.quotesError ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(p.quotesError)}</div>` : ""}
+        ${p.quotesError ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${
+          p.quotesError.length > 1
+            ? `<ul class="error-list">${p.quotesError.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`
+            : escapeHtml(p.quotesError[0])
+        }</div>` : ""}
         <div class="quotes-bar">
           <div class="quotes-fx">
             <span class="muted small">Câmbio USD/BRL</span>
