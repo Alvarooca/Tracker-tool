@@ -1160,6 +1160,9 @@ function renderUnrealized(rows) {
 
   let totalCostUsd = 0;
   let totalNowUsd = 0;
+  let totalCostBrl = 0;
+  let totalNowBrl = 0;
+  let anyBrlGap = false;
   const itemsHtml = withCost
     .map((r) => {
       const price = parseNum(r.price);
@@ -1171,7 +1174,12 @@ function renderUnrealized(rows) {
       totalNowUsd += nowValueUsd;
       const gainUsd = nowValueUsd - costBasisUsd;
       const pct = costBasisUsd ? (gainUsd / costBasisUsd) * 100 : 0;
-      const gainBrl = fx ? gainUsd * fx : null;
+      const hasCostBrl = typeof r.avgCostBrl === "number" && Number.isFinite(r.avgCostBrl);
+      const costBasisBrl = hasCostBrl ? r.avgCostBrl * qty : fx ? costBasisUsd * fx : null;
+      const nowValueBrl = hasPrice && fx ? price * qty * fx : null;
+      const gainBrl = costBasisBrl !== null && nowValueBrl !== null ? nowValueBrl - costBasisBrl : null;
+      if (gainBrl !== null) { totalCostBrl += costBasisBrl; totalNowBrl += nowValueBrl; }
+      else if (hasPrice) anyBrlGap = true;
       return `<tr>
         <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b></span></div></td>
         <td class="num small">$${r.avgCost.toFixed(2)}</td>
@@ -1183,13 +1191,15 @@ function renderUnrealized(rows) {
 
   const totalGainUsd = totalNowUsd - totalCostUsd;
   const totalPct = totalCostUsd ? (totalGainUsd / totalCostUsd) * 100 : 0;
-  const totalGainBrl = fx ? totalGainUsd * fx : null;
+  const totalGainBrl = totalCostBrl ? totalNowBrl - totalCostBrl : fx ? totalGainUsd * fx : null;
+  const totalPctBrl = totalCostBrl ? ((totalNowBrl - totalCostBrl) / totalCostBrl) * 100 : totalPct;
 
   return `<div class="card">
     <div class="card-title-row">
       <h2 class="card-title">Ganancia/pérdida no realizada</h2>
-      <span class="${totalGainUsd >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalPct)})</b></span>
+      <span class="${(totalGainBrl ?? totalGainUsd) >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalCostBrl ? totalPctBrl : totalPct)})</b></span>
     </div>
+    ${anyBrlGap ? `<p class="muted small">Algunas posiciones no tienen cambio histórico (compradas antes de configurar tu clave de Twelve Data) — su ganancia se muestra convertida al cambio de hoy.</p>` : ""}
     <p class="muted small">Compara el precio promedio de compra (importado) con el precio actual de cada activo, en dólares. ${fx ? "Convertido a reales con el cambio configurado." : "Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
     <div class="table-scroll"><table class="table">
       <thead><tr><th>Activo</th><th class="num">Compra</th><th class="num">Actual</th><th class="num">Ganancia</th></tr></thead>
@@ -1885,6 +1895,36 @@ function exportBackup() {
   };
   downloadBlob(JSON.stringify(backup, null, 2), `pnl-backup-${todayYMD()}.json`, "application/json");
 }
+async function fetchFxHistoryRange(fromDate, toDate) {
+  const twelveKey = (state.posicoes.apiKey || "").trim();
+  if (!twelveKey) return {};
+  try {
+    const url = `https://api.twelvedata.com/time_series?symbol=USD/BRL&interval=1day&start_date=${fromDate}&end_date=${toDate}&apikey=${encodeURIComponent(twelveKey)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!Array.isArray(data?.values)) return {};
+    const map = {};
+    data.values.forEach((v) => {
+      const d = String(v.datetime).slice(0, 10);
+      const close = parseFloat(v.close);
+      if (Number.isFinite(close)) map[d] = close;
+    });
+    return map;
+  } catch (_) {
+    return {};
+  }
+}
+
+function fxRateNear(fxMap, dateStr) {
+  const dates = Object.keys(fxMap).sort();
+  if (!dates.length) return null;
+  let chosen = null;
+  for (const d of dates) {
+    if (d <= dateStr) chosen = d;
+    else break;
+  }
+  return fxMap[chosen ?? dates[0]];
+}
 
 function parseCsvLine(line) {
   const out = [];
@@ -2012,7 +2052,7 @@ function addTransaction() {
 function importPurchasesFile(file) {
   const p = state.posicoes;
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const lines = String(reader.result).split(/\r?\n/).filter((l) => l.trim());
       if (!lines.length) throw new Error("vacío");
@@ -2055,8 +2095,16 @@ function importPurchasesFile(file) {
       });
       persistTransactions();
 
+      const allDatesForFx = txs.map((cols) => {
+        const dateRaw = cols[idx.date] || "";
+        return dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
+      });
+      const fxFrom = allDatesForFx.length ? allDatesForFx.reduce((a, b) => (a < b ? a : b)) : todayYMD();
+      const fxHistory = await fetchFxHistoryRange(fxFrom, todayYMD());
+
       const qty = {};
       const cost = {};
+      const costBrl = {};
       txs.forEach((cols) => {
         const rawSym = (cols[idx.symbol] || "").trim();
         const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
@@ -2064,33 +2112,44 @@ function importPurchasesFile(file) {
         const type = (cols[idx.type] || "").trim().toLowerCase();
         const dateRaw = cols[idx.date] || "";
         const dateStr = dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
-        // Ajusta la cantidad de esta transacción al equivalente POST-split (mismo criterio
-        // que usa hoy tu posición), para que el costo promedio sea comparable.
         const q = splitAdjustQty(sym, parseQty(cols[idx.qty]), dateStr);
         const pr = parseNum(cols[idx.price]) / (q ? q / parseQty(cols[idx.qty]) || 1 : 1);
+        const fxAtTx = fxRateNear(fxHistory, dateStr);
         qty[sym] = qty[sym] || 0;
         cost[sym] = cost[sym] || 0;
+        costBrl[sym] = costBrl[sym] || 0;
         if (type === "buy") {
           qty[sym] += q;
           cost[sym] += q * pr;
+          if (fxAtTx) costBrl[sym] += q * pr * fxAtTx;
         } else if (type === "sell") {
           if (qty[sym] > 0) {
             const avg = cost[sym] / qty[sym];
+            const avgBrl = costBrl[sym] / qty[sym];
             cost[sym] -= avg * q;
+            costBrl[sym] -= avgBrl * q;
           }
           qty[sym] -= q;
         }
       });
 
       const avgCostByTicker = {};
+      const avgCostBrlByTicker = {};
       Object.keys(qty).forEach((sym) => {
-        if (qty[sym] > 0.0001) avgCostByTicker[sym] = cost[sym] / qty[sym];
+        if (qty[sym] > 0.0001) {
+          avgCostByTicker[sym] = cost[sym] / qty[sym];
+          avgCostBrlByTicker[sym] = costBrl[sym] / qty[sym];
+        }
       });
 
       let matched = 0;
       state.portfolio = state.portfolio.map((row) => {
         const avg = avgCostByTicker[row.ticker];
-        if (typeof avg === "number" && Number.isFinite(avg)) { matched++; return { ...row, avgCost: avg }; }
+        const avgBrl = avgCostBrlByTicker[row.ticker];
+        if (typeof avg === "number" && Number.isFinite(avg)) {
+          matched++;
+          return { ...row, avgCost: avg, avgCostBrl: Number.isFinite(avgBrl) ? avgBrl : null };
+        }
         return row;
       });
       persistPortfolio();
