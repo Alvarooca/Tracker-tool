@@ -1178,13 +1178,14 @@ function renderUnrealized(rows) {
       const costBasisBrl = hasCostBrl ? r.avgCostBrl * qty : fx ? costBasisUsd * fx : null;
       const nowValueBrl = hasPrice && fx ? price * qty * fx : null;
       const gainBrl = costBasisBrl !== null && nowValueBrl !== null ? nowValueBrl - costBasisBrl : null;
+      const pctDisplay = gainBrl !== null && costBasisBrl ? (gainBrl / costBasisBrl) * 100 : pct;
       if (gainBrl !== null) { totalCostBrl += costBasisBrl; totalNowBrl += nowValueBrl; }
       else if (hasPrice) anyBrlGap = true;
       return `<tr>
         <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b></span></div></td>
         <td class="num small">$${r.avgCost.toFixed(2)}</td>
         <td class="num small">${hasPrice ? "$" + price.toFixed(2) : "—"}</td>
-        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}</b>${hasPrice ? `<br><span class="small">${fmtPct(pct)}</span>` : ""}</td>
+        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}</b>${hasPrice ? `<br><span class="small">${fmtPct(pctDisplay)}</span>` : ""}</td>
       </tr>`;
     })
     .join("");
