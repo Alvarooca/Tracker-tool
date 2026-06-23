@@ -2096,13 +2096,6 @@ function importPurchasesFile(file) {
       });
       persistTransactions();
 
-      const allDatesForFx = txs.map((cols) => {
-        const dateRaw = cols[idx.date] || "";
-        return dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
-      });
-      const fxFrom = allDatesForFx.length ? allDatesForFx.reduce((a, b) => (a < b ? a : b)) : todayYMD();
-      const fxHistory = await fetchFxHistoryRange(fxFrom, todayYMD());
-
       const qty = {};
       const cost = {};
       const costBrl = {};
@@ -2115,8 +2108,7 @@ function importPurchasesFile(file) {
         const dateStr = dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
         const q = splitAdjustQty(sym, parseQty(cols[idx.qty]), dateStr);
         const pr = parseNum(cols[idx.price]) / (q ? q / parseQty(cols[idx.qty]) || 1 : 1);
-        const fxFromCsv = idx.fx !== -1 ? parseNum(cols[idx.fx]) : 0;
-        const fxAtTx = fxFromCsv > 0 ? fxFromCsv : fxRateNear(fxHistory, dateStr);
+        const fxAtTx = idx.fx !== -1 ? parseNum(cols[idx.fx]) : 0;
         qty[sym] = qty[sym] || 0;
         cost[sym] = cost[sym] || 0;
         costBrl[sym] = costBrl[sym] || 0;
