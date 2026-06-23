@@ -264,6 +264,22 @@ const fmtFullDate = (iso) => {
 
 const uid = () => `row-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
+// Splits manuales: ratio = cuántas acciones nuevas por cada acción vieja, vigentes desde
+// splitDate (inclusive). Los precios de la API ya vienen ajustados por split, así que hay
+// que multiplicar cantidades/dividir costos de transacciones ANTERIORES al split.
+const STOCK_SPLITS = {
+  ARKB: [{ date: "2025-06-13", ratio: 3 }],
+};
+const splitAdjustQty = (ticker, qty, dateStr) => {
+  const splits = STOCK_SPLITS[ticker];
+  if (!splits) return qty;
+  let adjusted = qty;
+  splits.forEach((s) => {
+    if (dateStr < s.date) adjusted *= s.ratio;
+  });
+  return adjusted;
+};
+
 const isWeekend = () => {
   const day = new Date().getDay();
   return day === 0 || day === 6;
@@ -1747,23 +1763,7 @@ async function importRealHistory() {
 // Reconstruct how many shares of a ticker were held on a given date, from saved
   // buy/sell transactions. Falls back to the CURRENT quantity (assuming the position was
   // held unchanged) only when there's no transaction history at all for that ticker.
-  // Splits manuales: ratio = cuántas acciones nuevas por cada acción vieja, vigentes desde
-  // splitDate (inclusive). Los precios históricos de la API ya vienen ajustados por split,
-  // así que hay que multiplicar la cantidad reconstruida en fechas ANTERIORES al split.
-  const STOCK_SPLITS = {
-    ARKB: [{ date: "2025-06-13", ratio: 3 }],
-  };
-  const splitAdjustQty = (ticker, qty, dateStr) => {
-    const splits = STOCK_SPLITS[ticker];
-    if (!splits) return qty;
-    let adjusted = qty;
-    splits.forEach((s) => {
-      if (dateStr < s.date) adjusted *= s.ratio;
-    });
-    return adjusted;
-  };
-
-  const txByTicker = {};
+ const txByTicker = {};
   state.transactions.forEach((t) => {
     (txByTicker[t.ticker] = txByTicker[t.ticker] || []).push(t);
   });
@@ -2062,8 +2062,12 @@ function importPurchasesFile(file) {
         const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
         if (!sym) return;
         const type = (cols[idx.type] || "").trim().toLowerCase();
-        const q = parseQty(cols[idx.qty]);
-        const pr = parseNum(cols[idx.price]);
+        const dateRaw = cols[idx.date] || "";
+        const dateStr = dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
+        // Ajusta la cantidad de esta transacción al equivalente POST-split (mismo criterio
+        // que usa hoy tu posición), para que el costo promedio sea comparable.
+        const q = splitAdjustQty(sym, parseQty(cols[idx.qty]), dateStr);
+        const pr = parseNum(cols[idx.price]) / (q ? q / parseQty(cols[idx.qty]) || 1 : 1);
         qty[sym] = qty[sym] || 0;
         cost[sym] = cost[sym] || 0;
         if (type === "buy") {
