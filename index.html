@@ -1747,6 +1747,22 @@ async function importRealHistory() {
 // Reconstruct how many shares of a ticker were held on a given date, from saved
   // buy/sell transactions. Falls back to the CURRENT quantity (assuming the position was
   // held unchanged) only when there's no transaction history at all for that ticker.
+  // Splits manuales: ratio = cuántas acciones nuevas por cada acción vieja, vigentes desde
+  // splitDate (inclusive). Los precios históricos de la API ya vienen ajustados por split,
+  // así que hay que multiplicar la cantidad reconstruida en fechas ANTERIORES al split.
+  const STOCK_SPLITS = {
+    ARKB: [{ date: "2025-06-13", ratio: 3 }],
+  };
+  const splitAdjustQty = (ticker, qty, dateStr) => {
+    const splits = STOCK_SPLITS[ticker];
+    if (!splits) return qty;
+    let adjusted = qty;
+    splits.forEach((s) => {
+      if (dateStr < s.date) adjusted *= s.ratio;
+    });
+    return adjusted;
+  };
+
   const txByTicker = {};
   state.transactions.forEach((t) => {
     (txByTicker[t.ticker] = txByTicker[t.ticker] || []).push(t);
@@ -1762,7 +1778,7 @@ async function importRealHistory() {
       any = true;
       qty += t.type === "buy" ? t.qty : -t.qty;
     });
-    return any ? qty : 0;
+    return any ? splitAdjustQty(ticker, qty, dateStr) : 0;
   };
   const qtyForRowAtDate = (p, dateStr) => {
     const recon = historicalQty(p.ticker, dateStr);
