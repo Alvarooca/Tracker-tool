@@ -1199,7 +1199,7 @@ function renderUnrealized(rows) {
       <h2 class="card-title">Ganancia/pérdida no realizada</h2>
       <span class="${(totalGainBrl ?? totalGainUsd) >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalCostBrl ? totalPctBrl : totalPct)})</b></span>
     </div>
-    ${anyBrlGap ? `<p class="muted small">Algunas posiciones no tienen cambio histórico (compradas antes de configurar tu clave de Twelve Data) — su ganancia se muestra convertida al cambio de hoy.</p>` : ""}
+    ${anyBrlGap ? `<p class="muted small">Importa tu historial de compras/ventas (CSV: columnas symbol, date, type, qty, price, y opcionalmente fx con el cambio USD/BRL exacto de esa operación) para calcular el precio promedio de compra de cada activo y ver la ganancia no realizada.</p>` : ""}
     <p class="muted small">Compara el precio promedio de compra (importado) con el precio actual de cada activo, en dólares. ${fx ? "Convertido a reales con el cambio configurado." : "Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
     <div class="table-scroll"><table class="table">
       <thead><tr><th>Activo</th><th class="num">Compra</th><th class="num">Actual</th><th class="num">Ganancia</th></tr></thead>
@@ -2073,7 +2073,7 @@ function importPurchasesFile(file) {
       // sort chronologically so sells reduce the running average cost correctly, oldest first.
       txs.sort((a, b) => new Date(a[idx.date]) - new Date(b[idx.date]));
 
-   const parseQty = (raw) => parseNum(String(raw ?? "").trim().replace(/,/g, ""));
+   const parseQty = (raw) => parseNum(raw);
 
       // Keep a persisted record of every transaction (deduped), so the app remembers how far
       // back your investing history goes — used e.g. to build the year filters in Historial.
