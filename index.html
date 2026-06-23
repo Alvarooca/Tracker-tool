@@ -2063,6 +2063,7 @@ function importPurchasesFile(file) {
         type: header.indexOf("type"),
         qty: header.indexOf("qty"),
         price: header.indexOf("price"),
+        fx: header.indexOf("fx"),
       };
       if (idx.symbol === -1 || idx.type === -1 || idx.qty === -1 || idx.price === -1) {
         throw new Error("Faltan columnas (symbol, type, qty, price)");
@@ -2114,7 +2115,14 @@ function importPurchasesFile(file) {
         const dateStr = dateRaw ? new Date(dateRaw).toISOString().slice(0, 10) : todayYMD();
         const q = splitAdjustQty(sym, parseQty(cols[idx.qty]), dateStr);
         const pr = parseNum(cols[idx.price]) / (q ? q / parseQty(cols[idx.qty]) || 1 : 1);
-        const fxAtTx = fxRateNear(fxHistory, dateStr);
+        const idx = {
+        symbol: header.indexOf("symbol"),
+        date: header.indexOf("date"),
+        type: header.indexOf("type"),
+        qty: header.indexOf("qty"),
+        price: header.indexOf("price"),
+        fx: header.indexOf("fx"),
+      };
         qty[sym] = qty[sym] || 0;
         cost[sym] = cost[sym] || 0;
         costBrl[sym] = costBrl[sym] || 0;
