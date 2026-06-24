@@ -443,6 +443,7 @@ const state = {
   portfolio: DEFAULT_PORTFOLIO.map((p) => ({ ...p })),
   history: [],
   transactions: [],
+  splits: [],
   hoje: null,
   posicoes: null,
   historico: null,
@@ -463,6 +464,10 @@ function loadState() {
     if (tx) state.transactions = JSON.parse(tx);
   } catch (_) {}
   try {
+    const sp = localStorage.getItem("pnl-splits");
+    if (sp) state.splits = JSON.parse(sp);
+  } catch (_) {}
+  try {
     const c = localStorage.getItem("pnl-currency");
     if (c === "USD" || c === "BRL") state.displayCurrency = c;
   } catch (_) {}
@@ -474,6 +479,10 @@ function loadState() {
 
 function persistTransactions() {
   try { localStorage.setItem("pnl-transactions", JSON.stringify(state.transactions)); } catch (_) {}
+}
+
+function persistSplits() {
+  try { localStorage.setItem("pnl-splits", JSON.stringify(state.splits)); } catch (_) {}
 }
 
 function persistPortfolio() {
@@ -488,15 +497,82 @@ function persistHistory() {
   } catch (_) {}
 }
 
-function resetHojeState() {
-  let quickSave = false;
-  try { quickSave = localStorage.getItem("pnl-quick-save") === "1"; } catch (_) {}
+// Recalcula el precio promedio de compra de un ticker a partir de TODAS sus transacciones
+// guardadas (compras/ventas), en orden cronológico, con el método de costo promedio.
+// Se usa tanto al importar CSV/agregar transacciones como al aplicar un desdoblamiento.
+function recomputeAvgCostFromTransactions(ticker) {
+  const txs = state.transactions
+    .filter((t) => t.ticker === ticker)
+    .slice()
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  let qty = 0;
+  let cost = 0;
+  txs.forEach((t) => {
+    if (t.type === "buy") {
+      qty += t.qty;
+      cost += t.qty * t.price;
+    } else if (t.type === "sell") {
+      if (qty > 0) {
+        const avg = cost / qty;
+        cost -= avg * t.qty;
+      }
+      qty -= t.qty;
+    }
+  });
+  return qty > 0.0001 ? cost / qty : null;
+}
 
+// Aplica un desdoblamiento (split) de acciones a un ticker: ajusta retroactivamente todas las
+// transacciones registradas ANTES de la fecha del split (qty × proporción, precio ÷ proporción)
+// para que queden en la misma escala que las acciones actuales (post-split), y recalcula el
+// precio promedio de compra. Funciona también para desdoblamientos inversos con proporción < 1.
+function applyStockSplit(ticker, dateStr, ratio) {
+  const cutoff = new Date(`${dateStr}T00:00:00`).getTime();
+  let adjustedCount = 0;
+  state.transactions = state.transactions.map((t) => {
+    if (t.ticker !== ticker) return t;
+    if (new Date(t.date).getTime() >= cutoff) return t; // ya están en la escala post-split
+    adjustedCount++;
+    return { ...t, qty: t.qty * ratio, price: t.price / ratio };
+  });
+  persistTransactions();
+
+  const newAvg = recomputeAvgCostFromTransactions(ticker);
+  state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: newAvg } : p));
+  persistPortfolio();
+
+  state.splits = [...state.splits, { id: uid(), ticker, date: dateStr, ratio, appliedAt: new Date().toISOString(), adjustedCount }];
+  persistSplits();
+  return adjustedCount;
+}
+
+// Revierte un desdoblamiento previamente aplicado (operación inversa) y lo quita de la lista.
+function removeStockSplit(id) {
+  const split = state.splits.find((s) => s.id === id);
+  if (!split) return;
+  const cutoff = new Date(`${split.date}T00:00:00`).getTime();
+  state.transactions = state.transactions.map((t) => {
+    if (t.ticker !== split.ticker) return t;
+    if (new Date(t.date).getTime() >= cutoff) return t;
+    return { ...t, qty: t.qty / split.ratio, price: t.price * split.ratio };
+  });
+  persistTransactions();
+
+  const newAvg = recomputeAvgCostFromTransactions(split.ticker);
+  state.portfolio = state.portfolio.map((p) => (p.ticker === split.ticker ? { ...p, avgCost: newAvg } : p));
+  persistPortfolio();
+
+  state.splits = state.splits.filter((s) => s.id !== id);
+  persistSplits();
+}
+
+function resetHojeState() {
   // Si hoy (según la hora de Brasil) ya tiene un registro en el historial — guardado
-  // automáticamente después de las 20:00, o guardado a mano antes — se muestra esa
-  // información directamente en vez de la pantalla "idle". Así la variación por activo
-  // se mantiene visible siempre, incluso al cambiar de pestaña o recargar la app, y solo
-  // cambia cuando se vuelve a tocar "Buscar variación automáticamente".
+  // automáticamente después de las 20:00 — se muestra esa información directamente en vez de
+  // la pantalla "idle". Así la variación por activo se mantiene visible siempre, incluso al
+  // cambiar de pestaña o recargar la app, y solo cambia cuando se vuelve a tocar
+  // "Buscar variación automáticamente" / "Actualizar variación" (eso solo refresca la vista,
+  // nunca guarda en el historial: el historial solo lo actualiza el proceso automático).
   const todayEntry = state.history.find((e) => dateToBrazilYMD(e.date) === brazilTodayYMD());
   if (todayEntry) {
     const reviewMap = {};
@@ -513,11 +589,9 @@ function resetHojeState() {
         fxGain: todayEntry.fxGain,
         total: todayEntry.total,
       },
-      updateSaldo: false,
       pasteText: "",
       fetchStatus: "idle",
       fetchProgressLabel: null,
-      quickSave,
       savedAt: todayEntry.date,
     };
     return;
@@ -529,11 +603,9 @@ function resetHojeState() {
     reviewMap: {},
     fxPctInput: "0",
     result: null,
-    updateSaldo: false,
     pasteText: "",
     fetchStatus: "idle",
     fetchProgressLabel: null,
-    quickSave,
     savedAt: null,
   };
 }
@@ -574,6 +646,17 @@ function resetPosicoesState() {
   const rows = state.portfolio
     .map((p) => ({ ...p, price: typeof p.price === "number" || typeof p.price === "string" ? p.price : (cache.quotes[p.ticker] ?? "") }))
     .sort((a, b) => weightOf(b) - weightOf(a)); // descending: biggest position first — only on first load of the tab, after that manual ↑↓ takes over
+
+  // ARKB (ARK 21Shares Bitcoin ETF) hizo un desdoblamiento real de 3-por-1 el 16/06/2025.
+  // Si el usuario tiene ARKB en la cartera y todavía no aplicó ese split, se precarga el
+  // formulario con esos datos para que sea un solo toque corregir el costo promedio.
+  const hasArkbAlready = state.splits.some((s) => s.ticker === "ARKB");
+  const hasArkbPosition = state.portfolio.some((p) => p.ticker === "ARKB");
+  const splitFormDefaults =
+    !hasArkbAlready && hasArkbPosition
+      ? { ticker: "ARKB", date: "2025-06-16", ratio: "3" }
+      : { ticker: "", date: todayYMD(), ratio: "" };
+
   state.posicoes = {
     rows,
     dirty: false,
@@ -588,6 +671,8 @@ function resetPosicoesState() {
     quotesError: null,
     importPurchasesMessage: null,
     txForm: { rowId: rows[0]?.id || "__new__", newTicker: "", newBroker: "", type: "buy", qty: "", price: "", date: todayYMD(), error: null, tickerSearchResults: [], tickerSearchStatus: "idle" },
+    splitForm: { ...splitFormDefaults, error: null },
+    splitMessage: null,
   };
 }
 
@@ -888,9 +973,9 @@ function renderHoje() {
       <div class="card upload-card">
         ${h.error ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(h.error)}</div>` : ""}
         ${isMarketClosedToday() ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} Hoy ${marketClosedReason()}: el mercado está cerrado. La búsqueda automática traería el último cierre disponible, no el de hoy.</div>` : ""}
-        <div class="banner banner-ok">${icon("check-circle", 15)} Si no registras el día a mano, a partir de las ${AUTO_SAVE_HOUR_BRAZIL}:00 (hora de Brasil) la app calcula y guarda el resultado de hoy automáticamente, sin necesidad de tocar nada.</div>
+        <div class="banner banner-ok">${icon("check-circle", 15)} A partir de las ${AUTO_SAVE_HOUR_BRAZIL}:00 (hora de Brasil) la app calcula y guarda el resultado de hoy automáticamente en el historial, sin necesidad de tocar nada. Las opciones de abajo solo muestran una vista previa, sin guardar nada.</div>
         ${icon("camera", 28, "muted")}
-        <p class="upload-text">Registra la variación de hoy buscando las cotizaciones automáticamente, pegando los números que ya tienes, o llenando manualmente.</p>
+        <p class="upload-text">Mira la variación de hoy buscando las cotizaciones automáticamente, pegando los números que ya tienes, o llenando manualmente.</p>
         <button class="btn btn-primary" data-action="fetch-live-day-change" ${h.fetchStatus === "loading" ? "disabled" : ""}>
           ${icon("refresh", 15, h.fetchStatus === "loading" ? "spin" : "")} ${fetchLabel}
         </button>
@@ -901,10 +986,6 @@ function renderHoje() {
         <p class="upload-hint">Consejo: copia los porcentajes de variación del día de cada activo y del dólar (USDBRL) y pega todo de una vez.</p>
         <div class="divider-text">o</div>
         <button class="btn btn-ghost" data-action="start-manual">${icon("pencil", 15)} Llenar manualmente</button>
-        <label class="checkbox-row">
-          <input type="checkbox" data-bind="quickSave" ${h.quickSave ? "checked" : ""}>
-          Guardar automáticamente en el historial después de buscar
-        </label>
       </div>`;
   } else if (h.status === "review" || h.status === "result" || h.status === "saved") {
     inner = renderHojeReviewResult();
@@ -971,13 +1052,9 @@ function renderHojeReviewResult() {
         <div class="summary-line"><span>Efecto dólar (${fmtPct(r.fxPct)})</span><span class="${r.fxGain >= 0 ? "up" : "down"}">${fmtBRL(r.fxGain)}</span></div>
         <div class="summary-line summary-total"><span>Total estimado</span><span class="${r.total >= 0 ? "up" : "down"}">${fmtBRL(r.total)}</span></div>
       </div>
-      <label class="checkbox-row">
-        <input type="checkbox" data-bind="updateSaldo" ${h.updateSaldo ? "checked" : ""}>
-        Actualizar saldo base de cada posición con el resultado de hoy
-      </label>
+      <div class="banner banner-warn">${icon("alert-triangle", 15)} Esto es solo una vista previa — no se guarda en el historial. El historial se actualiza únicamente de forma automática a las ${AUTO_SAVE_HOUR_BRAZIL}:00 hora de Brasil, en días con mercado abierto.</div>
       <div class="row-actions">
-        <button class="btn btn-ghost" data-action="discard-result">Descartar</button>
-        <button class="btn btn-primary" data-action="save-history">${icon("save", 15)} Guardar en el historial</button>
+        <button class="btn btn-ghost" data-action="discard-result">${icon("x", 15)} Cerrar vista previa</button>
       </div>`;
   } else if (h.status === "saved") {
     const r = h.result;
@@ -1094,8 +1171,9 @@ async function fetchLiveDayChange(opts = {}) {
   h.fetchStatus = "idle";
   // Al buscar automáticamente ya se muestra el resultado calculado por activo de inmediato
   // (sin un paso intermedio de revisión manual) — sigue pudiéndose ajustar con el lápiz "Editar valores".
+  // Tocar el botón a mano NUNCA guarda en el historial: solo el proceso automático (autoSave) lo hace.
   compute();
-  if ((h.quickSave || autoSave) && !h.error) {
+  if (autoSave && !h.error) {
     saveHistoryAction();
   }
 }
@@ -1120,13 +1198,9 @@ function parsePasted() {
   const fx = found["USDBRL"] ?? found["USD/BRL"] ?? found["USD"];
   state.hoje.fxPctInput = typeof fx === "number" ? String(fx) : "0";
   state.hoje.error = null;
-  state.hoje.status = "review";
-  if (state.hoje.quickSave) {
-    compute();
-    saveHistoryAction();
-  } else {
-    render();
-  }
+  // Pegar datos también muestra el resultado calculado de inmediato (vista previa) — nunca
+  // se guarda en el historial desde aquí; eso solo lo hace el proceso automático de las 20:00.
+  compute();
 }
 
 function compute() {
@@ -1173,15 +1247,6 @@ function saveHistoryAction() {
   }
   persistHistory();
 
-  if (h.updateSaldo) {
-    state.portfolio = state.portfolio.map((p) => {
-      const row = h.result.rows.find((r) => r.id === p.id);
-      if (!row) return p;
-      const newSaldo = row.saldo + row.gain + (row.saldo * h.result.fxPct) / 100;
-      return { ...p, saldo: Math.round(newSaldo * 100) / 100 };
-    });
-    persistPortfolio();
-  }
   h.status = "saved";
   h.savedAt = nowIso;
   render();
@@ -1429,6 +1494,41 @@ function renderPosicoes() {
             <button class="btn btn-primary" data-action="add-transaction">${icon("plus", 15)} Agregar transacción</button>
           </div>
           <p class="upload-hint">Actualiza la cantidad y recalcula el precio promedio de compra de esa posición (método costo promedio). Recuerda tocar "Guardar posiciones" después para que quede guardado.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Desdoblamientos de acciones (splits)</h2>
+        <p class="muted small">Cuando un activo hace un desdoblamiento (ej. ARKB hizo un 3-por-1 el 16/06/2025), el precio promedio de compra calculado con tus compras antiguas queda en una escala distinta a la de las acciones actuales, y la ganancia/pérdida no realizada se ve absurdamente alta o baja. Regístralo aquí para corregirlo: se ajustan las transacciones de ese activo anteriores a la fecha y se recalcula el precio promedio.</p>
+        ${
+          state.splits.length
+            ? `<div class="table-scroll"><table class="table">
+                <thead><tr><th>Activo</th><th>Fecha</th><th class="num">Proporción</th><th></th></tr></thead>
+                <tbody>
+                  ${state.splits
+                    .map(
+                      (s) => `<tr>
+                        <td><b>${escapeHtml(s.ticker)}</b></td>
+                        <td class="small">${fmtShortDate(`${s.date}T12:00:00`)}</td>
+                        <td class="num small">${s.ratio}:1</td>
+                        <td><button class="icon-btn" data-action="remove-split" data-id="${s.id}" title="Revertir este desdoblamiento">${icon("trash", 14)}</button></td>
+                      </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table></div>`
+            : `<p class="muted small">Todavía no registraste ningún desdoblamiento.</p>`
+        }
+        ${state.posicoes.splitMessage ? `<div class="banner banner-ok">${icon("check-circle", 15)} ${escapeHtml(state.posicoes.splitMessage)}</div>` : ""}
+        ${state.posicoes.splitForm.error ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(state.posicoes.splitForm.error)}</div>` : ""}
+        <div class="tx-form-row">
+          <input class="input-cell" data-bind="splitTicker" placeholder="Ticker (ej. ARKB)" value="${escapeAttr(state.posicoes.splitForm.ticker)}">
+          <input class="input-cell tx-date" type="date" data-bind="splitDate" value="${escapeAttr(state.posicoes.splitForm.date)}" style="text-align:left">
+          <input class="input-cell" inputmode="decimal" data-bind="splitRatio" placeholder="Proporción (ej. 3)" value="${escapeAttr(state.posicoes.splitForm.ratio)}">
+        </div>
+        <p class="upload-hint">Proporción = acciones nuevas por cada acción antigua. Un desdoblamiento 3-por-1 (como el de ARKB) es "3". Un desdoblamiento inverso 1-por-2 es "0,5".</p>
+        <div class="row-actions">
+          <button class="btn btn-primary btn-sm" data-action="add-split">${icon("plus", 13)} Aplicar desdoblamiento</button>
         </div>
       </div>
 
@@ -1947,11 +2047,12 @@ function exportBackup() {
   const cache = loadQuotesCache();
   const backup = {
     type: "pnl-tracker-backup",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     portfolio: state.portfolio,
     history: state.history,
     transactions: state.transactions,
+    splits: state.splits,
     apiKey: cache.apiKey,
     finnhubKey: cache.finnhubKey,
     quotes: cache.quotes,
@@ -2033,6 +2134,36 @@ function selectTickerResult(symbol) {
   const f = state.posicoes.txForm;
   f.newTicker = symbol;
   f.tickerSearchResults = [];
+  render();
+}
+
+function addSplitAction() {
+  const f = state.posicoes.splitForm;
+  const ticker = String(f.ticker || "").trim().toUpperCase();
+  const ratio = parseNum(f.ratio);
+  const dateStr = f.date;
+  f.error = null;
+
+  if (!ticker) { f.error = "Ingresa el ticker del activo que tuvo el desdoblamiento."; render(); return; }
+  if (!dateStr) { f.error = "Ingresa la fecha del desdoblamiento."; render(); return; }
+  if (!ratio || ratio <= 0 || ratio === 1) {
+    f.error = 'Ingresa una proporción válida (distinta de 1). Ej: "3" para un desdoblamiento 3-por-1, o "0,5" para uno inverso 1-por-2.';
+    render();
+    return;
+  }
+
+  const adjustedCount = applyStockSplit(ticker, dateStr, ratio);
+  resetPosicoesState();
+  state.posicoes.splitMessage = adjustedCount
+    ? `Desdoblamiento de ${ticker} (${ratio}:1) aplicado a ${adjustedCount} transacción(es). Precio promedio de compra recalculado.`
+    : `Desdoblamiento de ${ticker} (${ratio}:1) registrado. No había transacciones anteriores a esa fecha para ajustar.`;
+  render();
+}
+
+function removeSplitAction(id) {
+  removeStockSplit(id);
+  resetPosicoesState();
+  state.posicoes.splitMessage = "Desdoblamiento revertido.";
   render();
 }
 
@@ -2204,7 +2335,9 @@ function importBackupFile(file) {
       state.portfolio = data.portfolio;
       state.history = Array.isArray(data.history) ? data.history : [];
       state.transactions = Array.isArray(data.transactions) ? data.transactions : [];
+      state.splits = Array.isArray(data.splits) ? data.splits : [];
       persistTransactions();
+      persistSplits();
       try {
         localStorage.setItem("pnl-twelvedata-key", data.apiKey || "");
         localStorage.setItem("pnl-finnhub-key", data.finnhubKey || "");
@@ -2281,8 +2414,13 @@ function render() {
   const displayedTotal = isUsd ? (totalUsd ? fmtUSD(totalUsd) : "— US$") : fmtBRL(totalSaldo);
   const lastEntry = state.history.length ? state.history[state.history.length - 1] : null;
   const isTodayEntry = lastEntry && dateToBrazilYMD(lastEntry.date) === brazilTodayYMD();
-  const dayChangeHtml = isTodayEntry
-    ? `<span class="header-total-change ${lastEntry.total >= 0 ? "up" : "down"}">${lastEntry.total >= 0 ? "+" : ""}${fmtBRL(lastEntry.total)} (${fmtPct(totalSaldo ? (lastEntry.total / totalSaldo) * 100 : 0)})</span>`
+  // Si hoy todavía no está guardado en el historial pero hay una vista previa calculada
+  // (estado "result", desde "Buscar variación automáticamente"/pegar/llenar manualmente),
+  // se usa esa vista previa para que la variación del día aparezca en el saldo total
+  // (número grande) del header en todas las pestañas, no solo después de guardarse.
+  const dayChangeSource = isTodayEntry ? lastEntry : state.hoje && state.hoje.status === "result" ? state.hoje.result : null;
+  const dayChangeHtml = dayChangeSource
+    ? `<span class="header-total-change ${dayChangeSource.total >= 0 ? "up" : "down"}">${dayChangeSource.total >= 0 ? "+" : ""}${fmtBRL(dayChangeSource.total)} (${fmtPct(totalSaldo ? (dayChangeSource.total / totalSaldo) * 100 : 0)})</span>`
     : "";
 
   root.innerHTML = `
@@ -2337,7 +2475,6 @@ function handleAction(action, el) {
     case "cancel-review": resetHojeState(); render(); break;
     case "compute": compute(); break;
     case "discard-result": resetHojeState(); render(); break;
-    case "save-history": saveHistoryAction(); break;
     case "new-entry": resetHojeState(); render(); break;
     case "add-row": addRow(); break;
     case "remove-row": removeRow(id); break;
@@ -2348,6 +2485,8 @@ function handleAction(action, el) {
     case "trigger-import-backup": document.getElementById("import-backup-input")?.click(); break;
     case "trigger-import-purchases": document.getElementById("import-purchases-input")?.click(); break;
     case "add-transaction": addTransaction(); break;
+    case "add-split": addSplitAction(); break;
+    case "remove-split": removeSplitAction(id); break;
     case "select-ticker-result": selectTickerResult(el.dataset.symbol); break;
     case "fetch-quotes": fetchQuotes(); break;
     case "add-demo": addDemo(); break;
@@ -2433,6 +2572,12 @@ root.addEventListener("input", (e) => {
     state.posicoes.txForm.price = el.value;
   } else if (bind === "txDate") {
     state.posicoes.txForm.date = el.value;
+  } else if (bind === "splitTicker") {
+    state.posicoes.splitForm.ticker = el.value;
+  } else if (bind === "splitDate") {
+    state.posicoes.splitForm.date = el.value;
+  } else if (bind === "splitRatio") {
+    state.posicoes.splitForm.ratio = el.value;
   } else if (["ticker", "broker", "quantity", "price", "saldo"].includes(bind)) {
     const row = state.posicoes.rows.find((r) => r.id === id);
     if (row) {
@@ -2451,15 +2596,6 @@ root.addEventListener("input", (e) => {
 });
 
 root.addEventListener("change", (e) => {
-  const el = e.target.closest('[data-bind="updateSaldo"]');
-  if (el) state.hoje.updateSaldo = el.checked;
-
-  const quickSaveEl = e.target.closest('[data-bind="quickSave"]');
-  if (quickSaveEl) {
-    state.hoje.quickSave = quickSaveEl.checked;
-    try { localStorage.setItem("pnl-quick-save", quickSaveEl.checked ? "1" : "0"); } catch (_) {}
-  }
-
   if (e.target.id === "import-backup-input" && e.target.files?.[0]) {
     importBackupFile(e.target.files[0]);
     e.target.value = "";
