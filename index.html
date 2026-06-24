@@ -2248,8 +2248,17 @@ function render() {
   const displayedTotal = isUsd ? (totalUsd ? fmtUSD(totalUsd) : "— US$") : fmtBRL(totalSaldo);
   const lastEntry = state.history.length ? state.history[state.history.length - 1] : null;
   const isTodayEntry = lastEntry && new Date(lastEntry.date).toDateString() === new Date().toDateString();
+  const fxForHeader = parseNum(state.posicoes?.fxRateInput);
+  const dayChangePct = isTodayEntry && totalSaldo ? (lastEntry.total / totalSaldo) * 100 : 0;
+  const dayChangeValueDisplay = isTodayEntry
+    ? isUsd
+      ? fxForHeader
+        ? fmtUSD(lastEntry.total / fxForHeader)
+        : "— US$"
+      : fmtBRL(lastEntry.total)
+    : "";
   const dayChangeHtml = isTodayEntry
-    ? `<span class="header-total-change ${lastEntry.total >= 0 ? "up" : "down"}">${lastEntry.total >= 0 ? "+" : ""}${fmtBRL(lastEntry.total)} (${fmtPct(totalSaldo ? (lastEntry.total / totalSaldo) * 100 : 0)})</span>`
+    ? `<span class="header-total-change ${lastEntry.total >= 0 ? "up" : "down"}">${lastEntry.total >= 0 ? "+" : ""}${dayChangeValueDisplay} (${fmtPct(dayChangePct)})</span>`
     : "";
 
   root.innerHTML = `
