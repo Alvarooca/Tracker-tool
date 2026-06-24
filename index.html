@@ -1818,6 +1818,7 @@ async function importRealHistory() {
       const rows = state.portfolio.map((p) => {
         const prevDate = tickerPrevDate[p.ticker]?.[d];
         const priceAtPrev = prevDate ? tickerCloses[p.ticker]?.[prevDate] : null;
+        const fxAtPrev = prevDate ? fxRates[prevDate] : null;
         const qtyStart = Math.max(0, qtyForRowAtDate(p, prevDate || d));
         const pct = tickerChangePct[p.ticker]?.[d] ?? 0;
         // Si falta precio o cambio histórico para ese día, no hay forma confiable de
