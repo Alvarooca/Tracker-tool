@@ -499,27 +499,47 @@ function persistHistory() {
 
 // Recalcula el precio promedio de compra de un ticker a partir de TODAS sus transacciones
 // guardadas (compras/ventas), en orden cronológico, con el método de costo promedio.
-// Se usa tanto al importar CSV/agregar transacciones como al aplicar un desdoblamiento.
-function recomputeAvgCostFromTransactions(ticker) {
+// Calcula dos versiones del costo:
+//  - avgCostUsd: el promedio en dólares (lo que ya mostraba la app).
+//  - avgCostBrl: el promedio en reales usando el cambio USD/BRL del día de CADA compra
+//    (no el cambio de hoy). Esto es lo que estaba faltando: la ganancia/pérdida no realizada
+//    en reales solo es correcta si el costo también se calcula con el cambio histórico de
+//    cuando se compró, no con el cambio actual aplicado a todo (ver "Buscar cambios
+//    históricos" en la tarjeta de ganancia/pérdida no realizada). Si falta el cambio
+//    histórico de alguna compra de ese ticker, avgCostBrl queda en null (la app entonces usa
+//    el cambio actual como aproximación, igual que antes, en vez de mezclar datos parciales).
+function recomputeCostBasisFromTransactions(ticker) {
   const txs = state.transactions
     .filter((t) => t.ticker === ticker)
     .slice()
     .sort((a, b) => new Date(a.date) - new Date(b.date));
   let qty = 0;
-  let cost = 0;
+  let costUsd = 0;
+  let costBrl = 0;
+  let missingFx = false;
   txs.forEach((t) => {
     if (t.type === "buy") {
       qty += t.qty;
-      cost += t.qty * t.price;
+      costUsd += t.qty * t.price;
+      if (typeof t.fx === "number" && t.fx > 0) {
+        costBrl += t.qty * t.price * t.fx;
+      } else {
+        missingFx = true;
+      }
     } else if (t.type === "sell") {
       if (qty > 0) {
-        const avg = cost / qty;
-        cost -= avg * t.qty;
+        const avgUsd = costUsd / qty;
+        costUsd -= avgUsd * t.qty;
+        const avgBrl = costBrl / qty;
+        costBrl -= avgBrl * t.qty;
       }
       qty -= t.qty;
     }
   });
-  return qty > 0.0001 ? cost / qty : null;
+  return {
+    avgCostUsd: qty > 0.0001 ? costUsd / qty : null,
+    avgCostBrl: qty > 0.0001 && !missingFx ? costBrl / qty : null,
+  };
 }
 
 // Aplica un desdoblamiento (split) de acciones a un ticker: ajusta retroactivamente todas las
@@ -537,8 +557,8 @@ function applyStockSplit(ticker, dateStr, ratio) {
   });
   persistTransactions();
 
-  const newAvg = recomputeAvgCostFromTransactions(ticker);
-  state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: newAvg } : p));
+  const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
+  state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: avgCostUsd, avgCostBrl } : p));
   persistPortfolio();
 
   state.splits = [...state.splits, { id: uid(), ticker, date: dateStr, ratio, appliedAt: new Date().toISOString(), adjustedCount }];
@@ -558,8 +578,8 @@ function removeStockSplit(id) {
   });
   persistTransactions();
 
-  const newAvg = recomputeAvgCostFromTransactions(split.ticker);
-  state.portfolio = state.portfolio.map((p) => (p.ticker === split.ticker ? { ...p, avgCost: newAvg } : p));
+  const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(split.ticker);
+  state.portfolio = state.portfolio.map((p) => (p.ticker === split.ticker ? { ...p, avgCost: avgCostUsd, avgCostBrl } : p));
   persistPortfolio();
 
   state.splits = state.splits.filter((s) => s.id !== id);
@@ -673,6 +693,9 @@ function resetPosicoesState() {
     txForm: { rowId: rows[0]?.id || "__new__", newTicker: "", newBroker: "", type: "buy", qty: "", price: "", date: todayYMD(), error: null, tickerSearchResults: [], tickerSearchStatus: "idle" },
     splitForm: { ...splitFormDefaults, error: null },
     splitMessage: null,
+    fxBackfillStatus: "idle",
+    fxBackfillError: null,
+    fxBackfillMessage: null,
   };
 }
 
@@ -778,6 +801,99 @@ async function fetchQuotes() {
   p.quotesProgressLabel = null;
   render();
 }
+
+// Busca en Twelve Data el cambio USD/BRL del día de cada compra/venta que todavía no lo
+// tenga guardado, y lo asigna a esa transacción. Con eso se puede calcular el costo de cada
+// compra en reales usando el cambio de ESE día (no el de hoy), que es la causa de que la
+// ganancia/pérdida no realizada en reales no coincidiera con otras apps (como Kinvo).
+async function backfillHistoricalFx() {
+  const ps = state.posicoes;
+  const twelveKey = (ps.apiKey || "").trim();
+  const missing = state.transactions.filter((t) => t.type === "buy" && !(typeof t.fx === "number" && t.fx > 0));
+
+  if (!missing.length) {
+    ps.fxBackfillStatus = "idle";
+    ps.fxBackfillError = null;
+    ps.fxBackfillMessage = "Todas las compras ya tienen el cambio histórico guardado.";
+    render();
+    return;
+  }
+  if (!twelveKey) {
+    ps.fxBackfillError = ["Configura tu clave de Twelve Data (arriba en esta pestaña) para poder buscar el cambio histórico."];
+    render();
+    return;
+  }
+
+  ps.fxBackfillStatus = "loading";
+  ps.fxBackfillError = null;
+  ps.fxBackfillMessage = null;
+  render();
+
+  const dates = missing.map((t) => String(t.date).slice(0, 10));
+  const minDate = dates.reduce((a, b) => (a < b ? a : b));
+  const maxDate = todayYMD();
+
+  try {
+    const url = `https://api.twelvedata.com/time_series?symbol=USD/BRL&interval=1day&start_date=${minDate}&end_date=${maxDate}&outputsize=5000&apikey=${encodeURIComponent(twelveKey)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data && data.status === "error") throw new Error(data.message || "Error en Twelve Data");
+    if (!Array.isArray(data?.values) || !data.values.length) throw new Error("Sin datos históricos del cambio USD/BRL para ese período.");
+
+    const closesByDate = {};
+    data.values.forEach((v) => {
+      const d = String(v.datetime).slice(0, 10);
+      const close = parseFloat(v.close);
+      if (Number.isFinite(close)) closesByDate[d] = close;
+    });
+    const sortedDates = Object.keys(closesByDate).sort();
+    // Si la compra fue un día sin cotización (fin de semana/feriado en el calendario de FX),
+    // se usa el último día con cotización disponible antes de esa fecha.
+    const nearestRate = (ymd) => {
+      if (closesByDate[ymd] !== undefined) return closesByDate[ymd];
+      let candidate = null;
+      for (const d of sortedDates) {
+        if (d <= ymd) candidate = d;
+        else break;
+      }
+      return candidate !== null ? closesByDate[candidate] : null;
+    };
+
+    let filled = 0;
+    const affectedTickers = new Set();
+    state.transactions = state.transactions.map((t) => {
+      if (t.type !== "buy" || (typeof t.fx === "number" && t.fx > 0)) return t;
+      const ymd = String(t.date).slice(0, 10);
+      const rate = nearestRate(ymd);
+      if (rate === null) return t;
+      filled++;
+      affectedTickers.add(t.ticker);
+      return { ...t, fx: rate };
+    });
+    persistTransactions();
+
+    affectedTickers.forEach((ticker) => {
+      const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
+      state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: avgCostUsd ?? p.avgCost, avgCostBrl } : p));
+    });
+    persistPortfolio();
+
+    const pending = missing.length - filled;
+    ps.fxBackfillMessage =
+      `Se completó el cambio histórico de ${filled} de ${missing.length} compra(s).` +
+      (pending ? ` ${pending} quedaron sin datos (fuera del rango disponible).` : "");
+    ps.fxBackfillError = null;
+  } catch (err) {
+    ps.fxBackfillError = [err.message || "No pude buscar el cambio histórico (sin conexión)."];
+  }
+
+  resetPosicoesState();
+  state.posicoes.fxBackfillStatus = "idle";
+  if (ps.fxBackfillMessage) state.posicoes.fxBackfillMessage = ps.fxBackfillMessage;
+  if (ps.fxBackfillError) state.posicoes.fxBackfillError = ps.fxBackfillError;
+  render();
+}
+
 function resetHistoricoState() {
   const earliestTx = state.transactions.length
     ? state.transactions.reduce((min, t) => (t.date < min ? t.date : min), state.transactions[0].date)
@@ -1296,6 +1412,12 @@ function renderUnrealized(rows) {
 
   let totalCostUsd = 0;
   let totalNowUsd = 0;
+  let totalCostBrlKnown = 0; // costo en reales SOLO de los activos con cambio histórico conocido
+  let totalNowBrlKnown = 0;
+  let approxCostUsd = 0; // costo/valor (US$) de los activos que todavía usan aproximación
+  let approxNowUsd = 0;
+  let anyApproximated = false;
+
   const itemsHtml = withCost
     .map((r) => {
       const price = parseNum(r.price);
@@ -1306,31 +1428,86 @@ function renderUnrealized(rows) {
       totalCostUsd += costBasisUsd;
       totalNowUsd += nowValueUsd;
       const gainUsd = nowValueUsd - costBasisUsd;
-      const pct = costBasisUsd ? (gainUsd / costBasisUsd) * 100 : 0;
-      const gainBrl = fx ? gainUsd * fx : null;
+      const pctUsd = costBasisUsd ? (gainUsd / costBasisUsd) * 100 : 0;
+
+      const hasHistoricalFx = typeof r.avgCostBrl === "number" && r.avgCostBrl > 0;
+      let gainBrl = null;
+      let pct = pctUsd;
+      let approximated = false;
+      if (hasPrice && fx) {
+        if (hasHistoricalFx) {
+          const costBasisBrl = r.avgCostBrl * qty;
+          const nowValueBrl = price * qty * fx;
+          gainBrl = nowValueBrl - costBasisBrl;
+          pct = costBasisBrl ? (gainBrl / costBasisBrl) * 100 : 0;
+          totalCostBrlKnown += costBasisBrl;
+          totalNowBrlKnown += nowValueBrl;
+        } else {
+          gainBrl = gainUsd * fx;
+          approximated = true;
+          anyApproximated = true;
+          approxCostUsd += costBasisUsd;
+          approxNowUsd += nowValueUsd;
+        }
+      }
+      const approxBadge = approximated
+        ? ` <span class="muted" title="Se usó el cambio de hoy como aproximación: falta el cambio histórico de alguna compra de este activo.">≈</span>`
+        : "";
       return `<tr>
         <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b></span></div></td>
         <td class="num small">$${r.avgCost.toFixed(2)}</td>
         <td class="num small">${hasPrice ? "$" + price.toFixed(2) : "—"}</td>
-        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}</b>${hasPrice ? `<br><span class="small">${fmtPct(pct)}</span>` : ""}</td>
+        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}${approxBadge}</b>${hasPrice ? `<br><span class="small">${fmtPct(pct)}</span>` : ""}</td>
       </tr>`;
     })
     .join("");
 
   const totalGainUsd = totalNowUsd - totalCostUsd;
-  const totalPct = totalCostUsd ? (totalGainUsd / totalCostUsd) * 100 : 0;
-  const totalGainBrl = fx ? totalGainUsd * fx : null;
+  const totalPctUsd = totalCostUsd ? (totalGainUsd / totalCostUsd) * 100 : 0;
+
+  // El total combina lo calculado con el cambio histórico real (para los activos que ya lo
+  // tienen) con la aproximación al cambio de hoy para el resto — si "anyApproximated" es
+  // verdadero, el aviso de abajo deja claro que el total todavía es parcialmente aproximado.
+  let totalGainBrl = null;
+  let totalPctBrl = totalPctUsd;
+  if (fx) {
+    const approxGainBrl = (approxNowUsd - approxCostUsd) * fx;
+    const totalCostBrlMixed = totalCostBrlKnown + approxCostUsd * fx;
+    totalGainBrl = totalNowBrlKnown - totalCostBrlKnown + approxGainBrl;
+    totalPctBrl = totalCostBrlMixed ? (totalGainBrl / totalCostBrlMixed) * 100 : 0;
+  }
+
+  const ps = state.posicoes;
+  const backfillLabel = ps.fxBackfillStatus === "loading" ? "Buscando…" : "Buscar cambios históricos";
 
   return `<div class="card">
     <div class="card-title-row">
       <h2 class="card-title">Ganancia/pérdida no realizada</h2>
-      <span class="${totalGainUsd >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalPct)})</b></span>
+      <span class="${totalGainUsd >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalPctBrl)})</b></span>
     </div>
-    <p class="muted small">Compara el precio promedio de compra (importado) con el precio actual de cada activo, en dólares. ${fx ? "Convertido a reales con el cambio configurado." : "Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
+    <p class="muted small">Compara el precio promedio de compra con el precio actual de cada activo, en dólares${fx ? ", convertido a reales con el cambio histórico del día de cada compra (cuando está disponible)." : ". Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
+    ${
+      anyApproximated
+        ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} Los activos marcados con "≈" todavía no tienen el cambio histórico de alguna compra, así que se aproximan con el cambio de HOY — por eso pueden no coincidir con otras apps (como Kinvo), que sí usan el cambio del día de cada compra. Toca "${backfillLabel}" abajo para corregirlo.</div>`
+        : ""
+    }
     <div class="table-scroll"><table class="table">
       <thead><tr><th>Activo</th><th class="num">Compra</th><th class="num">Actual</th><th class="num">Ganancia</th></tr></thead>
       <tbody>${itemsHtml}</tbody>
     </table></div>
+    <div class="row-actions">
+      <button class="btn btn-ghost btn-sm" data-action="backfill-fx" ${ps.fxBackfillStatus === "loading" ? "disabled" : ""}>
+        ${icon("refresh", 13, ps.fxBackfillStatus === "loading" ? "spin" : "")} ${backfillLabel}
+      </button>
+    </div>
+    ${ps.fxBackfillMessage ? `<div class="banner banner-ok" style="margin-top:10px">${icon("check-circle", 15)} ${escapeHtml(ps.fxBackfillMessage)}</div>` : ""}
+    ${
+      ps.fxBackfillError
+        ? `<div class="banner banner-warn" style="margin-top:10px">${icon("alert-triangle", 15)} ${
+            ps.fxBackfillError.length > 1 ? `<ul class="error-list">${ps.fxBackfillError.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>` : escapeHtml(ps.fxBackfillError[0])
+          }</div>`
+        : ""
+    }
   </div>`;
 }
 
@@ -1456,7 +1633,7 @@ function renderPosicoes() {
 
       <div class="card">
         <h2 class="card-title">Precio de compra</h2>
-        <p class="muted small">Importa tu historial de compras/ventas (CSV exportado de TradingView: columnas symbol, date, type, qty, price) para calcular el precio promedio de compra de cada activo y ver la ganancia no realizada.</p>
+        <p class="muted small">Importa tu historial de compras/ventas (CSV con columnas symbol, date, type, qty, price — formato de TradingView, o de Kinvo si además incluye la columna "fx" con el cambio histórico) para calcular el precio promedio de compra de cada activo y ver la ganancia no realizada, ya en reales con el cambio real de cada compra cuando esa columna está disponible.</p>
         ${state.posicoes.importPurchasesMessage ? `<div class="banner banner-ok">${icon("check-circle", 15)} ${escapeHtml(state.posicoes.importPurchasesMessage)}</div>` : ""}
         <div class="row-actions">
           <button class="btn btn-ghost" data-action="trigger-import-purchases">${icon("refresh", 15)} Importar historial de compras (CSV)</button>
@@ -2177,35 +2354,42 @@ function addTransaction() {
   if (!qty || qty <= 0) { f.error = "Ingresa una cantidad válida (mayor a 0)."; render(); return; }
   if (f.type === "buy" && (!price || price <= 0)) { f.error = "Ingresa un precio válido (mayor a 0)."; render(); return; }
 
+  // Si la operación es de hoy, el cambio USD/BRL configurado arriba YA ES el cambio histórico
+  // correcto para esa fecha — se guarda directo en la transacción. Si es una fecha pasada, se
+  // deja en null y se completa después con "Buscar cambios históricos".
+  const fxForTx = f.date === todayYMD() ? parseNum(p.fxRateInput) || null : null;
+
+  let ticker;
   if (f.rowId === "__new__") {
-    const ticker = f.newTicker.trim().toUpperCase();
+    ticker = f.newTicker.trim().toUpperCase();
     if (!ticker) { f.error = "Ingresa el ticker de la nueva posición."; render(); return; }
     if (f.type === "sell") { f.error = "No se puede vender algo que todavía no está en tu carteira. Agrégalo como compra primero."; render(); return; }
-    const newRow = { id: uid(), ticker, broker: f.newBroker.trim(), quantity: qty, avgCost: price, price: "", saldo: 0 };
+    const newRow = { id: uid(), ticker, broker: f.newBroker.trim(), quantity: qty, avgCost: price, avgCostBrl: fxForTx ? price * fxForTx : null, price: "", saldo: 0 };
     p.rows = [...p.rows, newRow];
     p.dirty = true;
     f.rowId = newRow.id;
-    state.transactions.push({ id: uid(), source: "manual", ticker, date: new Date(`${f.date}T12:00:00`).toISOString(), type: f.type, qty, price });
+    state.transactions.push({ id: uid(), source: "manual", ticker, date: new Date(`${f.date}T12:00:00`).toISOString(), type: f.type, qty, price, fx: fxForTx });
   } else {
     const row = p.rows.find((r) => r.id === f.rowId);
     if (!row) { f.error = "No encontré esa posición."; render(); return; }
+    ticker = row.ticker;
     const oldQty = parseNum(row.quantity);
-    const oldAvgCost = typeof row.avgCost === "number" ? row.avgCost : null;
     if (f.type === "buy") {
-      const newQty = oldQty + qty;
-      row.avgCost = oldAvgCost ? (oldQty * oldAvgCost + qty * price) / newQty : price;
-      row.quantity = newQty;
+      row.quantity = oldQty + qty;
     } else {
       if (qty > oldQty + 0.0001) { f.error = `Esa posición solo tiene ${oldQty} unidades — no se puede vender ${qty}.`; render(); return; }
-      const newQty = Math.max(oldQty - qty, 0);
-      row.quantity = newQty;
-      if (newQty <= 0.0001) { row.avgCost = null; row.quantity = 0; }
-      // avgCost of remaining shares stays the same (average-cost method)
+      row.quantity = Math.max(oldQty - qty, 0);
     }
     p.dirty = true;
-    state.transactions.push({ id: uid(), source: "manual", ticker: row.ticker, date: new Date(`${f.date}T12:00:00`).toISOString(), type: f.type, qty, price: price || row.avgCost || 0 });
+    state.transactions.push({ id: uid(), source: "manual", ticker: row.ticker, date: new Date(`${f.date}T12:00:00`).toISOString(), type: f.type, qty, price: price || row.avgCost || 0, fx: fxForTx });
   }
   persistTransactions();
+
+  // El precio promedio (en US$ y, si hay datos suficientes, en R$) se recalcula siempre a
+  // partir de TODO el historial de transacciones, con el método de costo promedio.
+  const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
+  p.rows = p.rows.map((r) => (r.ticker === ticker ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
+  state.portfolio = state.portfolio.map((r) => (r.ticker === ticker ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
 
   f.qty = "";
   f.price = "";
@@ -2229,6 +2413,7 @@ function importPurchasesFile(file) {
         type: header.indexOf("type"),
         qty: header.indexOf("qty"),
         price: header.indexOf("price"),
+        fx: header.indexOf("fx"), // opcional: Kinvo exporta esta columna con el cambio USD/BRL de cada operación
       };
       if (idx.symbol === -1 || idx.type === -1 || idx.qty === -1 || idx.price === -1) {
         throw new Error("Faltan columnas (symbol, type, qty, price)");
@@ -2255,6 +2440,7 @@ function importPurchasesFile(file) {
       // back your investing history goes — used e.g. to build the year filters in Historial.
       const txKey = (t) => `${t.ticker}|${t.date}|${t.type}|${t.qty.toFixed(4)}|${t.price.toFixed(4)}`;
       const existingKeys = new Set(state.transactions.map(txKey));
+      let fxBackfilledFromCsv = 0;
       txs.forEach((cols) => {
         const rawSym = (cols[idx.symbol] || "").trim();
         const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
@@ -2263,55 +2449,51 @@ function importPurchasesFile(file) {
         if (type !== "buy" && type !== "sell") return;
         const dateRaw = cols[idx.date] || "";
         const date = dateRaw ? new Date(dateRaw).toISOString() : new Date().toISOString();
-        const rec = { ticker: sym, date, type, qty: parseQty(cols[idx.qty]), price: parseNum(cols[idx.price]) };
+        const fxFromFile = idx.fx !== -1 ? parseNum(cols[idx.fx]) || null : null;
+        const rec = { ticker: sym, date, type, qty: parseQty(cols[idx.qty]), price: parseNum(cols[idx.price]), fx: fxFromFile };
         const key = txKey(rec);
         if (!existingKeys.has(key)) {
           existingKeys.add(key);
           state.transactions.push({ id: uid(), source: "csv", ...rec });
+        } else if (fxFromFile) {
+          // Esta transacción ya estaba guardada (de una importación anterior, posiblemente de
+          // un archivo sin la columna "fx") — si todavía no tenía el cambio histórico, se
+          // completa ahora con el de este archivo en vez de descartarlo.
+          const existingIdx = state.transactions.findIndex((t) => txKey(t) === key && !(typeof t.fx === "number" && t.fx > 0));
+          if (existingIdx !== -1) {
+            state.transactions[existingIdx] = { ...state.transactions[existingIdx], fx: fxFromFile };
+            fxBackfilledFromCsv++;
+          }
         }
       });
       persistTransactions();
 
-      const qty = {};
-      const cost = {};
+      // El precio promedio se recalcula a partir de TODO el historial de transacciones ya
+      // persistido (no solo de las filas de este archivo), para que sea correcto incluso si
+      // el CSV importado es parcial o se reimporta más de una vez.
+      const tickersInFile = new Set();
       txs.forEach((cols) => {
         const rawSym = (cols[idx.symbol] || "").trim();
         const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
-        if (!sym) return;
-        const type = (cols[idx.type] || "").trim().toLowerCase();
-        const q = parseQty(cols[idx.qty]);
-        const pr = parseNum(cols[idx.price]);
-        qty[sym] = qty[sym] || 0;
-        cost[sym] = cost[sym] || 0;
-        if (type === "buy") {
-          qty[sym] += q;
-          cost[sym] += q * pr;
-        } else if (type === "sell") {
-          if (qty[sym] > 0) {
-            const avg = cost[sym] / qty[sym];
-            cost[sym] -= avg * q;
-          }
-          qty[sym] -= q;
-        }
-      });
-
-      const avgCostByTicker = {};
-      Object.keys(qty).forEach((sym) => {
-        if (qty[sym] > 0.0001) avgCostByTicker[sym] = cost[sym] / qty[sym];
+        if (sym) tickersInFile.add(sym);
       });
 
       let matched = 0;
-      state.portfolio = state.portfolio.map((row) => {
-        const avg = avgCostByTicker[row.ticker];
-        if (typeof avg === "number" && Number.isFinite(avg)) { matched++; return { ...row, avgCost: avg }; }
-        return row;
+      tickersInFile.forEach((sym) => {
+        const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(sym);
+        if (avgCostUsd === null) return;
+        matched++;
+        state.portfolio = state.portfolio.map((row) => (row.ticker === sym ? { ...row, avgCost: avgCostUsd, avgCostBrl } : row));
       });
       persistPortfolio();
       resetPosicoesState();
       state.posicoes.quotesError = matched
         ? null
         : ["No encontré ningún ticker de ese archivo que coincida con tu carteira."];
-      state.posicoes.importPurchasesMessage = matched ? `Precio de compra actualizado para ${matched} activo(s).` : null;
+      state.posicoes.importPurchasesMessage = matched
+        ? `Precio de compra actualizado para ${matched} activo(s).` +
+          (fxBackfilledFromCsv ? ` Se completó el cambio histórico (columna "fx") de ${fxBackfilledFromCsv} transacción(es) que ya tenías guardadas.` : "")
+        : null;
       render();
     } catch (err) {
       p.quotesError = ["No pude leer ese CSV. Revisa que tenga las columnas symbol, date, type, qty, price (formato de TradingView)."];
@@ -2489,6 +2671,7 @@ function handleAction(action, el) {
     case "remove-split": removeSplitAction(id); break;
     case "select-ticker-result": selectTickerResult(el.dataset.symbol); break;
     case "fetch-quotes": fetchQuotes(); break;
+    case "backfill-fx": backfillHistoricalFx(); break;
     case "add-demo": addDemo(); break;
     case "import-real-history": importRealHistory(); break;
     case "export-csv": exportCsv(); break;
