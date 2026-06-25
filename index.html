@@ -542,6 +542,32 @@ function recomputeCostBasisFromTransactions(ticker) {
   };
 }
 
+// Aplica un precio promedio recalculado (USD y, si está disponible, BRL) a las posiciones de
+// un ticker. El CSV no distingue corretora — cuando hay UNA sola posición para ese ticker no
+// hay ambigüedad. Pero cuando el mismo ticker está repartido en varias corretoras (p. ej. PG en
+// E*TRADE y en Nomad, cada una con su propio costo real), aplicar el mismo promedio combinado a
+// TODAS las filas es incorrecto para las posiciones chicas que probablemente no están
+// representadas en este historial de transacciones. En ese caso, el promedio recalculado se
+// aplica solo a la posición DOMINANTE (la que tiene más cantidad, y por lo tanto concentra casi
+// toda la actividad reflejada en las transacciones), dejando las demás posiciones del mismo
+// ticker sin tocar en vez de "contaminarlas" con un número que probablemente no les corresponde.
+function applyAvgCostToTickerRows(sym, avgCostUsd, avgCostBrl) {
+  const rowsForTicker = state.portfolio.filter((r) => r.ticker === sym);
+  const targetId = rowsForTicker.length <= 1 ? null : rowsForTicker.reduce((a, b) => (parseNum(b.quantity) > parseNum(a.quantity) ? b : a)).id;
+  state.portfolio = state.portfolio.map((row) => {
+    if (row.ticker !== sym) return row;
+    if (targetId !== null && row.id !== targetId) return row; // posición chica de otra corretora: no se toca
+    return { ...row, avgCost: avgCostUsd, avgCostBrl };
+  });
+  if (state.posicoes) {
+    state.posicoes.rows = state.posicoes.rows.map((row) => {
+      if (row.ticker !== sym) return row;
+      if (targetId !== null && row.id !== targetId) return row;
+      return { ...row, avgCost: avgCostUsd, avgCostBrl };
+    });
+  }
+}
+
 // Aplica un desdoblamiento (split) de acciones a un ticker: ajusta retroactivamente todas las
 // transacciones registradas ANTES de la fecha del split (qty × proporción, precio ÷ proporción)
 // para que queden en la misma escala que las acciones actuales (post-split), y recalcula el
@@ -558,7 +584,7 @@ function applyStockSplit(ticker, dateStr, ratio) {
   persistTransactions();
 
   const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
-  state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: avgCostUsd, avgCostBrl } : p));
+  applyAvgCostToTickerRows(ticker, avgCostUsd, avgCostBrl);
   persistPortfolio();
 
   state.splits = [...state.splits, { id: uid(), ticker, date: dateStr, ratio, appliedAt: new Date().toISOString(), adjustedCount }];
@@ -579,7 +605,7 @@ function removeStockSplit(id) {
   persistTransactions();
 
   const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(split.ticker);
-  state.portfolio = state.portfolio.map((p) => (p.ticker === split.ticker ? { ...p, avgCost: avgCostUsd, avgCostBrl } : p));
+  applyAvgCostToTickerRows(split.ticker, avgCostUsd, avgCostBrl);
   persistPortfolio();
 
   state.splits = state.splits.filter((s) => s.id !== id);
@@ -935,7 +961,13 @@ async function backfillHistoricalFx() {
 
     affectedTickers.forEach((ticker) => {
       const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
-      state.portfolio = state.portfolio.map((p) => (p.ticker === ticker ? { ...p, avgCost: avgCostUsd ?? p.avgCost, avgCostBrl } : p));
+      const rowsForTicker = state.portfolio.filter((p) => p.ticker === ticker);
+      const targetId = rowsForTicker.length <= 1 ? null : rowsForTicker.reduce((a, b) => (parseNum(b.quantity) > parseNum(a.quantity) ? b : a)).id;
+      state.portfolio = state.portfolio.map((p) => {
+        if (p.ticker !== ticker) return p;
+        if (targetId !== null && p.id !== targetId) return p;
+        return { ...p, avgCost: avgCostUsd ?? p.avgCost, avgCostBrl };
+      });
     });
     persistPortfolio();
 
@@ -2425,7 +2457,7 @@ function dedupeSplitsManualAction() {
     const tickers = new Set(state.splits.map((s) => s.ticker));
     tickers.forEach((sym) => {
       const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(sym);
-      state.portfolio = state.portfolio.map((row) => (row.ticker === sym ? { ...row, avgCost: avgCostUsd, avgCostBrl } : row));
+      applyAvgCostToTickerRows(sym, avgCostUsd, avgCostBrl);
     });
     persistPortfolio();
   }
@@ -2478,10 +2510,13 @@ function addTransaction() {
   persistTransactions();
 
   // El precio promedio (en US$ y, si hay datos suficientes, en R$) se recalcula siempre a
-  // partir de TODO el historial de transacciones, con el método de costo promedio.
+  // partir de TODO el historial de transacciones, con el método de costo promedio. Se aplica
+  // solo a la fila donde se registró esta transacción (no a otras filas que compartan el mismo
+  // ticker en otra corretora, que pueden tener un costo real distinto no reflejado aquí).
+  // Nota: f.rowId ya fue reasignado al id real de la fila más arriba, aunque haya empezado en "__new__".
   const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
-  p.rows = p.rows.map((r) => (r.ticker === ticker ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
-  state.portfolio = state.portfolio.map((r) => (r.ticker === ticker ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
+  p.rows = p.rows.map((r) => (r.id === f.rowId ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
+  state.portfolio = state.portfolio.map((r) => (r.id === f.rowId ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
 
   f.qty = "";
   f.price = "";
@@ -2586,7 +2621,7 @@ function importPurchasesFile(file) {
         const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(sym);
         if (avgCostUsd === null) return;
         matched++;
-        state.portfolio = state.portfolio.map((row) => (row.ticker === sym ? { ...row, avgCost: avgCostUsd, avgCostBrl } : row));
+        applyAvgCostToTickerRows(sym, avgCostUsd, avgCostBrl);
       });
       persistPortfolio();
       resetPosicoesState();
@@ -2730,7 +2765,7 @@ function render() {
             </div>
           </div>
         </div>
-        ${renderTickerTape(state.portfolio, lastEntry)}
+        ${renderTickerTape(state.portfolio, dayChangeSource)}
       </header>
 
       <nav class="tabbar">
