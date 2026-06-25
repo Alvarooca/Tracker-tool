@@ -1493,14 +1493,20 @@ function renderUnrealized(rows) {
 
       const hasHistoricalFx = typeof r.avgCostBrl === "number" && r.avgCostBrl > 0;
       let gainBrl = null;
-      let pct = pctUsd;
       let approximated = false;
+      let fxEffectBrl = null; // parte de la ganancia en reales que viene SOLO del cambio (no del precio)
       if (hasPrice && fx) {
         if (hasHistoricalFx) {
           const costBasisBrl = r.avgCostBrl * qty;
           const nowValueBrl = price * qty * fx;
           gainBrl = nowValueBrl - costBasisBrl;
-          pct = costBasisBrl ? (gainBrl / costBasisBrl) * 100 : 0;
+          // gainBrl = (efecto precio, ya convertido al cambio de HOY) + (efecto cambiario, el
+          // resto). El "efecto precio" es exactamente gainUsd × fx — el mismo número que ya se
+          // ve reflejado al comparar las columnas Compra/Actual — así el desglose siempre cierra
+          // exacto contra esas dos columnas, en vez de mostrar un % que parece no relacionarse
+          // con ellas (que es justamente lo que generaba la confusión).
+          const priceEffectBrl = gainUsd * fx;
+          fxEffectBrl = gainBrl - priceEffectBrl;
           totalCostBrlKnown += costBasisBrl;
           totalNowBrlKnown += nowValueBrl;
         } else {
@@ -1514,11 +1520,18 @@ function renderUnrealized(rows) {
       const approxBadge = approximated
         ? ` <span class="muted" title="Se usó el cambio de hoy como aproximación: falta el cambio histórico de alguna compra de este activo.">≈</span>`
         : "";
+      // El % que se muestra siempre corresponde al precio en dólares (Compra vs Actual), para
+      // que nunca contradiga esas dos columnas. El efecto del cambio (cuando se conoce el
+      // histórico) se muestra aparte, en reales, como una línea adicional.
+      const fxLine =
+        fxEffectBrl !== null
+          ? `<br><span class="small muted">cambio: ${fxEffectBrl >= 0 ? "+" : ""}${fmtBRL(fxEffectBrl)}</span>`
+          : "";
       return `<tr>
         <td><div class="ticker-cell">${avatarHtml(r.ticker, state.posicoes?.logos?.[r.ticker], 20)}<span><b>${escapeHtml(r.ticker)}</b></span></div></td>
         <td class="num small">$${r.avgCost.toFixed(2)}</td>
         <td class="num small">${hasPrice ? "$" + price.toFixed(2) : "—"}</td>
-        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}${approxBadge}</b>${hasPrice ? `<br><span class="small">${fmtPct(pct)}</span>` : ""}</td>
+        <td class="num ${hasPrice ? (gainUsd >= 0 ? "up" : "down") : "muted"}"><b>${hasPrice ? (gainBrl !== null ? fmtBRL(gainBrl) : `US$ ${gainUsd.toFixed(2)}`) : "—"}${approxBadge}</b>${hasPrice ? `<br><span class="small">${fmtPct(pctUsd)}</span>${fxLine}` : ""}</td>
       </tr>`;
     })
     .join("");
@@ -1546,7 +1559,7 @@ function renderUnrealized(rows) {
       <h2 class="card-title">Ganancia/pérdida no realizada</h2>
       <span class="${totalGainUsd >= 0 ? "up" : "down"} small"><b>${totalGainBrl !== null ? fmtBRL(totalGainBrl) : `US$ ${totalGainUsd.toFixed(2)}`} (${fmtPct(totalPctBrl)})</b></span>
     </div>
-    <p class="muted small">Compara el precio promedio de compra con el precio actual de cada activo, en dólares${fx ? ", convertido a reales con el cambio histórico del día de cada compra (cuando está disponible)." : ". Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
+    <p class="muted small">Compara el precio promedio de compra con el precio actual de cada activo, en dólares${fx ? ". La ganancia/pérdida en reales se separa en el efecto del precio (el % siempre corresponde a comparar Compra vs Actual en dólares) y el efecto del cambio desde el día de cada compra, para que ambos números sean consistentes entre sí." : ". Configura el cambio USD/BRL arriba para verlo también en reales."}</p>
     ${
       anyApproximated
         ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} Los activos marcados con "≈" todavía no tienen el cambio histórico de alguna compra, así que se aproximan con el cambio de HOY — por eso pueden no coincidir con otras apps (como Kinvo), que sí usan el cambio del día de cada compra. Toca "${backfillLabel}" abajo para corregirlo.</div>`
