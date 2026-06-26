@@ -1086,7 +1086,7 @@ function fmtK(v) {
   return `${(v / 1000).toFixed(1)}k`;
 }
 
-function buildChart({ type, data, valueKey, labelKey, height = 180 }) {
+function buildChart({ type, data, valueKey, labelKey, height = 180, maxLabels = 6 }) {
   const W = 340, H = height;
   const padL = 42, padR = 8, padT = 12, padB = 24;
   const innerW = W - padL - padR;
@@ -1113,7 +1113,6 @@ function buildChart({ type, data, valueKey, labelKey, height = 180 }) {
     gridLines += `<text x="${padL - 6}" y="${gy + 3}" text-anchor="end">${fmtK(val)}</text>`;
   }
 
-  const maxLabels = 6;
   const skip = Math.max(1, Math.ceil(data.length / maxLabels));
   let xLabels = "";
   data.forEach((d, i) => {
@@ -1955,14 +1954,47 @@ function renderHistorico() {
       </div>`;
   }
 
-  let cum = 0;
-  const chartData = periodFiltered.map((h) => {
-    cum += h.total;
-    return { date: fmtShortDate(h.date), total: h.total, cumulative: cum };
-  });
+  // El detalle del eje X depende del filtro activo:
+  // - "Este mes": un punto por día de ese mes (eje X = número de día).
+  // - "Este año" o un año pasado específico: se agrupan los días en MESES (eje X = ene, feb...),
+  //   para que el gráfico no se vea apretado con cientos de puntos diarios.
+  // - "Todo": se deja el comportamiento anterior (un punto por registro, con fecha corta).
+  const isMonthView = hs.periodFilter === "month";
+  const isYearAggregateView = hs.periodFilter === "year" || /^\d{4}$/.test(hs.periodFilter);
+  const MONTH_NAMES_SHORT = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
-  const lineSvg = buildChart({ type: "line", data: chartData, valueKey: "cumulative", labelKey: "date", height: 200 });
-  const barSvg = buildChart({ type: "bar", data: chartData, valueKey: "total", labelKey: "date", height: 160 });
+  let chartData;
+  let chartMaxLabels = 6;
+  let cum = 0;
+  if (isYearAggregateView) {
+    const byMonth = {};
+    periodFiltered.forEach((h) => {
+      const key = String(h.date).slice(0, 7); // YYYY-MM
+      byMonth[key] = (byMonth[key] || 0) + h.total;
+    });
+    const monthKeys = Object.keys(byMonth).sort();
+    chartData = monthKeys.map((key) => {
+      const total = byMonth[key];
+      cum += total;
+      const m = parseInt(key.slice(5, 7), 10) - 1;
+      return { date: MONTH_NAMES_SHORT[m], total, cumulative: cum };
+    });
+    chartMaxLabels = 12; // como máximo 12 meses, entran todos sin saltarse ninguno
+  } else if (isMonthView) {
+    chartData = periodFiltered.map((h) => {
+      cum += h.total;
+      return { date: String(new Date(h.date).getDate()), total: h.total, cumulative: cum };
+    });
+    chartMaxLabels = 12; // un mes tiene como máximo ~23 días hábiles; con esto entran casi todos
+  } else {
+    chartData = periodFiltered.map((h) => {
+      cum += h.total;
+      return { date: fmtShortDate(h.date), total: h.total, cumulative: cum };
+    });
+  }
+
+  const lineSvg = buildChart({ type: "line", data: chartData, valueKey: "cumulative", labelKey: "date", height: 200, maxLabels: chartMaxLabels });
+  const barSvg = buildChart({ type: "bar", data: chartData, valueKey: "total", labelKey: "date", height: 160, maxLabels: chartMaxLabels });
 
   const totalSaldoForReturn = state.portfolio.reduce((s, p) => s + (parseNum(p.saldo) || 0), 0);
   const baseSaldo = totalSaldoForReturn - cum;
@@ -2076,7 +2108,7 @@ function renderHistorico() {
         <div class="chart-wrap">${lineSvg}</div>
       </div>
       <div class="card">
-        <h2 class="card-title">Resultado por día</h2>
+        <h2 class="card-title">Resultado por ${isYearAggregateView ? "mes" : "día"}</h2>
         <div class="chart-wrap">${barSvg}</div>
       </div>
       <div class="card">
