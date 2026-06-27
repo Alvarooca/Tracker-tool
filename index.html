@@ -739,7 +739,7 @@ function resetHojeState() {
   };
 }
 function loadQuotesCache() {
-  let apiKey = "", finnhubKey = "", quotes = {}, logos = {}, fxRateInput = "", quotesUpdatedAt = null;
+  let apiKey = "", finnhubKey = "", quotes = {}, logos = {}, fxRateInput = "", quotesUpdatedAt = null, dividendTaxPct = "30";
   try { apiKey = localStorage.getItem("pnl-twelvedata-key") || ""; } catch (_) {}
   try { finnhubKey = localStorage.getItem("pnl-finnhub-key") || ""; } catch (_) {}
   try { quotes = JSON.parse(localStorage.getItem("pnl-quotes") || "{}"); } catch (_) {}
@@ -749,7 +749,11 @@ function loadQuotesCache() {
     fxRateInput = typeof fx === "number" ? String(fx) : "";
   } catch (_) {}
   try { quotesUpdatedAt = localStorage.getItem("pnl-quotes-updated-at") || null; } catch (_) {}
-  return { apiKey, finnhubKey, quotes, logos, fxRateInput, quotesUpdatedAt };
+  try {
+    const dt = localStorage.getItem("pnl-dividend-tax");
+    if (dt !== null && dt !== "") dividendTaxPct = dt;
+  } catch (_) {}
+  return { apiKey, finnhubKey, quotes, logos, fxRateInput, quotesUpdatedAt, dividendTaxPct };
 }
 
 function persistQuotesCache() {
@@ -761,7 +765,15 @@ function persistQuotesCache() {
     localStorage.setItem("pnl-logos", JSON.stringify(p.logos || {}));
     localStorage.setItem("pnl-fx", JSON.stringify(parseNum(p.fxRateInput) || null));
     if (p.quotesUpdatedAt) localStorage.setItem("pnl-quotes-updated-at", p.quotesUpdatedAt);
+    localStorage.setItem("pnl-dividend-tax", p.dividendTaxPct ?? "30");
   } catch (_) {}
+}
+
+function persistDividends() {
+  // Los dividendos viven dentro de state.transactions (type: "dividend"), así que se
+  // persisten con la misma función que compras/ventas — esto es solo un alias semántico
+  // usado en los lugares donde el código se refiere específicamente a dividendos.
+  persistTransactions();
 }
 
 function resetPosicoesState() {
@@ -799,6 +811,10 @@ function resetPosicoesState() {
     quotesProgressLabel: null,
     quotesError: null,
     importPurchasesMessage: null,
+    dividendTaxPct: cache.dividendTaxPct,
+    dividendCheckStatus: "idle",
+    dividendCheckError: null,
+    missingDividends: [], // [{ ticker, date, perShare }] — pagos vistos en Finnhub que no están registrados
     txForm: { rowId: rows[0]?.id || "__new__", newTicker: "", newBroker: "", type: "buy", qty: "", price: "", date: todayYMD(), error: null, tickerSearchResults: [], tickerSearchStatus: "idle" },
     splitForm: { ...splitFormDefaults, error: null },
     splitMessage: null,
@@ -1026,9 +1042,17 @@ function resetHistoricoState() {
     spxStatus: "idle",
     spxPct: null,
     spxError: null,
+    cdiStatus: "idle",
+    cdiPct: null,
+    cdiError: null,
+    ibovStatus: "idle",
+    ibovPct: null,
+    ibovPctInput: "",
+    ibovError: null,
     periodFilter: "all",
     importFromDate: defaultFrom,
     importToDate: todayYMD(),
+    autoFillNotice: null,
   };
 }
 
@@ -1062,6 +1086,40 @@ async function compareSpx() {
     hs.spxError = err.message || "No pude comparar con el S&P 500 (sin conexión).";
   }
   hs.spxStatus = "idle";
+  render();
+}
+
+// MEJORA #4 — Comparación contra el CDI, vía la API gratuita y sin clave del Banco Central
+// (serie 12 = CDI diario, % al día). Algunos navegadores pueden bloquear esta llamada por
+// CORS si el Banco Central no autoriza el origen — en ese caso se avisa y queda igual el
+// campo manual de Ibovespa de al lado como alternativa para comparar a mano.
+async function compareCdi() {
+  const hs = state.historico;
+  const sorted = [...state.history].sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (!sorted.length) return;
+  hs.cdiStatus = "loading";
+  hs.cdiError = null;
+  render();
+  try {
+    const toBcbDate = (ymd) => { const [y, m, d] = ymd.split("-"); return `${d}/${m}/${y}`; };
+    const start = toBcbDate(sorted[0].date.slice(0, 10));
+    const end = toBcbDate(new Date().toISOString().slice(0, 10));
+    const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial=${start}&dataFinal=${end}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("No pude conectarme a la API del Banco Central.");
+    const data = await resp.json();
+    if (!Array.isArray(data) || !data.length) throw new Error("Sin datos del CDI para ese período.");
+    let factor = 1;
+    data.forEach((d) => {
+      const v = parseFloat(String(d.valor).replace(",", "."));
+      if (Number.isFinite(v)) factor *= 1 + v / 100;
+    });
+    hs.cdiPct = (factor - 1) * 100;
+  } catch (err) {
+    hs.cdiError =
+      "No pude buscar el CDI automáticamente (puede ser un bloqueo de CORS del navegador a la API del Banco Central). Puedes comparar a mano con el campo de Ibovespa de abajo mientras tanto.";
+  }
+  hs.cdiStatus = "idle";
   render();
 }
 
@@ -1151,7 +1209,7 @@ let chartIdCounter = 0;
 
 function buildChart({ type, data, valueKey, labelKey, height = 180, maxLabels = 6 }) {
   const W = 340, H = height;
-  const padR = 10, padT = 14, padB = 24;
+  const padT = 14, padB = 24;
   const values = data.map((d) => d[valueKey]);
   const rawMin = Math.min(0, ...values);
   const rawMax = Math.max(0, ...values);
@@ -1163,6 +1221,16 @@ function buildChart({ type, data, valueKey, labelKey, height = 180, maxLabels = 
   // cortado contra el borde del SVG.
   const longestLabelChars = Math.max(...gridLabels.map((l) => l.length));
   const padL = Math.max(30, 12 + longestLabelChars * 7.2);
+
+  // El margen derecho se calcula según el ancho de la última etiqueta del eje X (la que
+  // siempre se muestra). Esa etiqueta está centrada ("text-anchor: middle") justo sobre el
+  // borde derecho del área interior del gráfico, así que si el margen es un valor fijo chico,
+  // la mitad derecha del texto queda fuera del viewBox y el navegador la recorta. Por eso se
+  // calcula igual que el margen izquierdo, en base al ancho real del texto que se va a mostrar.
+  const skip = Math.max(1, Math.ceil(data.length / maxLabels));
+  const shownLabelLens = data.map((d, i) => (i % skip === 0 || i === data.length - 1 ? String(d[labelKey] ?? "").length : 0));
+  const longestXLabelChars = Math.max(1, ...shownLabelLens);
+  const padR = Math.max(10, (longestXLabelChars * 6.4) / 2 + 4);
 
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
@@ -1179,7 +1247,6 @@ function buildChart({ type, data, valueKey, labelKey, height = 180, maxLabels = 
     gridLines += `<text class="chart-axis-label" x="${padL - 7}" y="${(gy + 3).toFixed(2)}" text-anchor="end">${fmtK(t)}</text>`;
   });
 
-  const skip = Math.max(1, Math.ceil(data.length / maxLabels));
   let xLabels = "";
   data.forEach((d, i) => {
     if (i % skip === 0 || i === data.length - 1) {
@@ -1583,6 +1650,80 @@ function updateLiveTotal() {
   if (headerSpan) headerSpan.textContent = fmtBRL(liveTotal);
 }
 
+// MEJORA #2 — Dividendos. Viven como transacciones tipo "dividend" dentro de
+// state.transactions (igual que buy/sell), con qty = acciones que cobraron el dividendo y
+// price = monto BRUTO por acción en US$ (antes de la retención de EE. UU.). El neto se calcula
+// siempre al mostrarlo, con la tasa de retención configurable abajo (30% por defecto, la
+// retención estándar para no residentes sin tratado fiscal) — así si algún broker retuvo un
+// % distinto, alcanza con ajustar la tasa en vez de editar cada dividendo.
+function renderDividendsCard() {
+  const p = state.posicoes;
+  const dividends = state.transactions.filter((t) => t.type === "dividend").slice().sort((a, b) => new Date(b.date) - new Date(a.date));
+  const taxPct = parseNum(p.dividendTaxPct) || 0;
+
+  let totalGrossUsd = 0, totalNetUsd = 0, totalNetBrlKnown = 0, anyFx = false;
+  const rowsHtml = dividends
+    .map((t) => {
+      const gross = t.qty * t.price;
+      const net = gross * (1 - taxPct / 100);
+      totalGrossUsd += gross;
+      totalNetUsd += net;
+      const hasFx = typeof t.fx === "number" && t.fx > 0;
+      if (hasFx) { totalNetBrlKnown += net * t.fx; anyFx = true; }
+      return `<tr>
+        <td><div class="ticker-cell">${avatarHtml(t.ticker, state.posicoes?.logos?.[t.ticker], 20)}<b>${escapeHtml(t.ticker)}</b></div></td>
+        <td class="small">${fmtShortDate(t.date)}</td>
+        <td class="num small">US$ ${net.toFixed(2)}${hasFx ? ` <span class="muted">(R$ ${(net * t.fx).toFixed(2)})</span>` : ""}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const missingHtml = p.missingDividends.length
+    ? `<div class="banner banner-warn">${icon("alert-triangle", 15)}
+        <div>Encontré ${p.missingDividends.length} dividendo(s) pagados que no tienes registrados:
+          <ul class="error-list">
+            ${p.missingDividends
+              .map(
+                (m) =>
+                  `<li>${escapeHtml(m.ticker)} · ${fmtShortDate(m.date)} · US$ ${m.perShare.toFixed(4)}/acción
+                    <button class="btn btn-ghost btn-sm" style="padding:2px 8px;margin-left:6px" data-action="quickadd-dividend" data-ticker="${escapeAttr(m.ticker)}" data-date="${escapeAttr(m.date.slice(0, 10))}" data-price="${m.perShare}">+ Agregar</button>
+                  </li>`
+              )
+              .join("")}
+          </ul>
+        </div>
+      </div>`
+    : "";
+
+  return `<div class="card">
+    <div class="card-title-row">
+      <h2 class="card-title">Dividendos recibidos</h2>
+      <span class="muted small">Neto: US$ ${totalNetUsd.toFixed(2)}${anyFx ? ` · R$ ${totalNetBrlKnown.toFixed(2)}` : ""}</span>
+    </div>
+    <p class="muted small">Bruto acumulado: US$ ${totalGrossUsd.toFixed(2)} · Retención EE. UU. aplicada: −US$ ${(totalGrossUsd - totalNetUsd).toFixed(2)}</p>
+    <div class="tx-form-row">
+      <span class="muted small" style="align-self:center">Retención EE. UU. (%)</span>
+      <input class="input-cell" inputmode="decimal" data-bind="dividendTaxPct" value="${escapeAttr(p.dividendTaxPct)}" style="max-width:90px">
+    </div>
+    ${
+      dividends.length
+        ? `<div class="table-scroll"><table class="table"><thead><tr><th>Activo</th><th>Fecha</th><th class="num">Neto</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`
+        : `<p class="muted small">Todavía no hay dividendos registrados. Impórtalos en el CSV (type=dividend) o agrégalos en "Precio de compra" → tipo "Dividendo".</p>`
+    }
+    ${
+      p.dividendCheckError
+        ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(p.dividendCheckError)}</div>`
+        : ""
+    }
+    ${missingHtml}
+    <div class="row-actions">
+      <button class="btn btn-ghost btn-sm" data-action="check-missing-dividends" ${p.dividendCheckStatus === "loading" ? "disabled" : ""}>
+        ${icon("refresh", 13, p.dividendCheckStatus === "loading" ? "spin" : "")} ${p.dividendCheckStatus === "loading" ? "Buscando…" : "Buscar dividendos pendientes"}
+      </button>
+    </div>
+  </div>`;
+}
+
 function renderUnrealized(rows) {
   const withCost = rows.filter((r) => typeof r.avgCost === "number" && r.avgCost > 0);
   if (!withCost.length) return "";
@@ -1824,7 +1965,7 @@ function renderPosicoes() {
 
       <div class="card">
         <h2 class="card-title">Precio de compra</h2>
-        <p class="muted small">Importa tu historial de compras/ventas (CSV con columnas symbol, date, type, qty, price — formato de TradingView, o de Kinvo si además incluye la columna "fx" con el cambio histórico) para calcular el precio promedio de compra de cada activo y ver la ganancia no realizada, ya en reales con el cambio real de cada compra cuando esa columna está disponible.</p>
+        <p class="muted small">Importa tu historial de compras/ventas/dividendos (CSV con columnas symbol, date, type, qty, price — formato de TradingView, o de Kinvo si además incluye la columna "fx" con el cambio histórico). En "type" usa buy, sell o dividend; para dividendos, "price" es el monto bruto por acción en US$ antes de la retención de EE. UU.</p>
         ${state.posicoes.importPurchasesMessage ? `<div class="banner banner-ok">${icon("check-circle", 15)} ${escapeHtml(state.posicoes.importPurchasesMessage)}</div>` : ""}
         <div class="row-actions">
           <button class="btn btn-ghost" data-action="trigger-import-purchases">${icon("refresh", 15)} Importar historial de compras (CSV)</button>
@@ -1832,7 +1973,7 @@ function renderPosicoes() {
         <input type="file" id="import-purchases-input" accept=".csv,text/csv" hidden>
 
         <div class="tx-form">
-          <p class="muted small breakdown-subtitle">O agrega una compra o venta nueva</p>
+          <p class="muted small breakdown-subtitle">O agrega una compra, venta o dividendo nuevo</p>
           ${txForm.error ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${escapeHtml(txForm.error)}</div>` : ""}
           <select class="input-cell tx-select" data-bind="txRowId">
             ${rows.map((r) => `<option value="${r.id}" ${txForm.rowId === r.id ? "selected" : ""}>${escapeHtml(r.ticker || "(sin ticker)")} · ${escapeHtml(r.broker || "—")}</option>`).join("")}
@@ -1853,17 +1994,32 @@ function renderPosicoes() {
             <select class="input-cell" data-bind="txType">
               <option value="buy" ${txForm.type === "buy" ? "selected" : ""}>Compra</option>
               <option value="sell" ${txForm.type === "sell" ? "selected" : ""}>Venta</option>
+              <option value="dividend" ${txForm.type === "dividend" ? "selected" : ""}>Dividendo</option>
             </select>
-            <input class="input-cell" inputmode="decimal" data-bind="txQty" placeholder="Cantidad" value="${escapeAttr(txForm.qty)}">
-            <input class="input-cell" inputmode="decimal" data-bind="txPrice" placeholder="Precio US$" value="${escapeAttr(txForm.price)}">
+            <input class="input-cell" inputmode="decimal" data-bind="txQty" placeholder="${txForm.type === "dividend" ? "Acciones" : "Cantidad"}" value="${escapeAttr(txForm.qty)}">
+            <input class="input-cell" inputmode="decimal" data-bind="txPrice" placeholder="${txForm.type === "dividend" ? "US$/acción (bruto)" : "Precio US$"}" value="${escapeAttr(txForm.price)}">
           </div>
           <input class="input-cell tx-date" type="date" data-bind="txDate" value="${escapeAttr(txForm.date)}" style="text-align:left">
+          ${
+            txForm.type === "dividend"
+              ? (() => {
+                  const gross = parseNum(txForm.qty) * parseNum(txForm.price);
+                  const taxPct = parseNum(state.posicoes.dividendTaxPct) || 0;
+                  const net = gross * (1 - taxPct / 100);
+                  return gross
+                    ? `<p class="upload-hint">Bruto: US$ ${gross.toFixed(2)} · Retención EE. UU. (${fmtPct(taxPct)}): −US$ ${(gross - net).toFixed(2)} · <b>Neto: US$ ${net.toFixed(2)}</b></p>`
+                    : `<p class="upload-hint">El dividendo NO cambia la cantidad de acciones de la posición; solo se registra como ingreso. La retención de EE. UU. se aplica sobre el monto bruto (configúrala abajo, en "Dividendos recibidos").</p>`;
+                })()
+              : ""
+          }
           <div class="row-actions">
             <button class="btn btn-primary" data-action="add-transaction">${icon("plus", 15)} Agregar transacción</button>
           </div>
-          <p class="upload-hint">Actualiza la cantidad y recalcula el precio promedio de compra de esa posición (método costo promedio). Recuerda tocar "Guardar posiciones" después para que quede guardado.</p>
+          <p class="upload-hint">${txForm.type === "dividend" ? "Se guarda como ingreso de dividendo; no cambia la cantidad de acciones." : "Actualiza la cantidad y recalcula el precio promedio de compra de esa posición (método costo promedio). Recuerda tocar \"Guardar posiciones\" después para que quede guardado."}</p>
         </div>
       </div>
+
+      ${renderDividendsCard()}
 
       <div class="card">
         <h2 class="card-title">Desdoblamientos de acciones (splits)</h2>
@@ -1975,6 +2131,8 @@ function renderHistorico() {
     ? `<div class="banner banner-warn">${icon("alert-triangle", 15)} ${
         hs.importError.length > 1 ? `<ul class="error-list">${hs.importError.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>` : escapeHtml(hs.importError[0])
       }</div>`
+    : hs.autoFillNotice
+    ? `<div class="banner banner-ok">${icon("refresh", 15, "spin")} ${escapeHtml(hs.autoFillNotice)}</div>`
     : hs.importMessage
     ? `<div class="banner banner-ok">${icon("check-circle", 15)} ${escapeHtml(hs.importMessage)}</div>`
     : "";
@@ -2053,52 +2211,71 @@ function renderHistorico() {
   let chartData;
   let chartMaxLabels = 6;
   let cum = 0;
+  // MEJORA #3 — Rendimiento total acumulado (%), con el método TWR (time-weighted return):
+  // se encadena el retorno DIARIO de cada registro (gain del día ÷ saldo base de ESE día,
+  // que ya viene guardado en rows[].saldo de cada entrada del historial) en vez de dividir la
+  // ganancia acumulada en R$ por el saldo actual. Así, a diferencia de "Patrimonio acumulado"
+  // (que es plata, no rendimiento), este % no se distorsiona cuando metes más plata a la
+  // cartera o retiras — es el mismo método que usan las plataformas de inversión para mostrar
+  // "tu rentabilidad" de forma comparable contra un índice o el CDI.
+  let twrFactor = 1;
+  const dayReturn = (h) => {
+    const base = h.rows.reduce((s, r) => s + (r.saldo || 0), 0);
+    return base > 0 ? h.total / base : 0;
+  };
   if (isYearAggregateView) {
     const byMonth = {};
+    const twrByMonth = {};
     periodFiltered.forEach((h) => {
       const key = String(h.date).slice(0, 7); // YYYY-MM
       byMonth[key] = (byMonth[key] || 0) + h.total;
+      twrFactor *= 1 + dayReturn(h);
+      twrByMonth[key] = (twrFactor - 1) * 100; // se sobreescribe en orden cronológico: queda el último valor del mes
     });
     const monthKeys = Object.keys(byMonth).sort();
     chartData = monthKeys.map((key) => {
       const total = byMonth[key];
       cum += total;
       const m = parseInt(key.slice(5, 7), 10) - 1;
-      return { date: MONTH_NAMES_SHORT[m], total, cumulative: cum };
+      return { date: MONTH_NAMES_SHORT[m], total, cumulative: cum, cumTwrPct: twrByMonth[key] };
     });
     chartMaxLabels = 12; // como máximo 12 meses, entran todos sin saltarse ninguno
   } else if (isMonthView) {
     chartData = periodFiltered.map((h) => {
       cum += h.total;
-      return { date: String(new Date(h.date).getDate()), total: h.total, cumulative: cum };
+      twrFactor *= 1 + dayReturn(h);
+      return { date: String(new Date(h.date).getDate()), total: h.total, cumulative: cum, cumTwrPct: (twrFactor - 1) * 100 };
     });
     chartMaxLabels = 12; // un mes tiene como máximo ~23 días hábiles; con esto entran casi todos
   } else if (isAllView) {
     const byYear = {};
+    const twrByYear = {};
     periodFiltered.forEach((h) => {
       const key = String(h.date).slice(0, 4); // YYYY
       byYear[key] = (byYear[key] || 0) + h.total;
+      twrFactor *= 1 + dayReturn(h);
+      twrByYear[key] = (twrFactor - 1) * 100;
     });
     const yearKeys = Object.keys(byYear).sort();
     chartData = yearKeys.map((key) => {
       const total = byYear[key];
       cum += total;
-      return { date: key, total, cumulative: cum };
+      return { date: key, total, cumulative: cum, cumTwrPct: twrByYear[key] };
     });
     chartMaxLabels = 12; // normalmente son pocos años; entran todos sin saltarse ninguno
   } else {
     chartData = periodFiltered.map((h) => {
       cum += h.total;
-      return { date: fmtShortDate(h.date), total: h.total, cumulative: cum };
+      twrFactor *= 1 + dayReturn(h);
+      return { date: fmtShortDate(h.date), total: h.total, cumulative: cum, cumTwrPct: (twrFactor - 1) * 100 };
     });
   }
 
   const lineSvg = buildChart({ type: "line", data: chartData, valueKey: "cumulative", labelKey: "date", height: 200, maxLabels: chartMaxLabels });
   const barSvg = buildChart({ type: "bar", data: chartData, valueKey: "total", labelKey: "date", height: 160, maxLabels: chartMaxLabels });
+  const twrSvg = buildChart({ type: "line", data: chartData, valueKey: "cumTwrPct", labelKey: "date", height: 180, maxLabels: chartMaxLabels });
 
-  const totalSaldoForReturn = state.portfolio.reduce((s, p) => s + (parseNum(p.saldo) || 0), 0);
-  const baseSaldo = totalSaldoForReturn - cum;
-  const totalReturnPct = baseSaldo > 0 ? (cum / baseSaldo) * 100 : 0;
+  const totalReturnPct = (twrFactor - 1) * 100;
   const firstDate = periodFiltered.length ? fmtFullDate(periodFiltered[0].date) : "";
   const spxLabel = hs.spxStatus === "loading" ? "Comparando…" : "Comparar con S&P 500";
   const spxResultHtml = hs.spxError
@@ -2108,6 +2285,21 @@ function renderHistorico() {
         cum >= 0 === hs.spxPct >= 0 ? (totalReturnPct > hs.spxPct ? "— le vas ganando 🎯" : "— el índice te va ganando") : ""
       }</p>`
     : "";
+  const cdiLabel = hs.cdiStatus === "loading" ? "Comparando…" : "Comparar con CDI";
+  const cdiResultHtml = hs.cdiError
+    ? `<p class="small down" style="margin-top:8px">${escapeHtml(hs.cdiError)}</p>`
+    : hs.cdiPct !== null
+    ? `<p class="small muted" style="margin-top:8px">CDI en el mismo período: <span class="up"><b>${fmtPct(hs.cdiPct)}</b></span> ${
+        totalReturnPct > hs.cdiPct ? "— le vas ganando 🎯" : "— el CDI te va ganando"
+      }</p>`
+    : "";
+  const ibovDiffHtml =
+    hs.ibovPctInput && parseNum(hs.ibovPctInput)
+      ? `<p class="small muted" style="margin-top:4px">Ibovespa en el mismo período: <span class="${parseNum(hs.ibovPctInput) >= 0 ? "up" : "down"}"><b>${fmtPct(parseNum(hs.ibovPctInput))}</b></span> ${
+          totalReturnPct > parseNum(hs.ibovPctInput) ? "— le vas ganando 🎯" : "— el índice te va ganando"
+        }</p>`
+      : "";
+
 
   const monthly = {};
   periodFiltered.forEach((h) => {
@@ -2132,8 +2324,19 @@ function renderHistorico() {
     ? `<div class="card total-return-card">
         <span class="muted small">Rendimiento total desde ${firstDate}</span>
         <span class="total-return-value ${cum >= 0 ? "up" : "down"}">${cum >= 0 ? "+" : ""}${fmtBRL(cum)} (${fmtPct(totalReturnPct)})</span>
-        <button class="btn btn-ghost btn-sm" style="margin-top:10px;align-self:flex-start" data-action="compare-spx" ${hs.spxStatus === "loading" ? "disabled" : ""}>${icon("refresh", 13, hs.spxStatus === "loading" ? "spin" : "")} ${spxLabel}</button>
+        <p class="muted small" style="margin-top:2px">% calculado con retorno ponderado en el tiempo (TWR) — no se distorsiona por aportes o retiros.</p>
+        <div class="toolbar-row" style="justify-content:flex-start;margin-top:8px">
+          <button class="btn btn-ghost btn-sm" data-action="compare-spx" ${hs.spxStatus === "loading" ? "disabled" : ""}>${icon("refresh", 13, hs.spxStatus === "loading" ? "spin" : "")} ${spxLabel}</button>
+          <button class="btn btn-ghost btn-sm" data-action="compare-cdi" ${hs.cdiStatus === "loading" ? "disabled" : ""}>${icon("refresh", 13, hs.cdiStatus === "loading" ? "spin" : "")} ${cdiLabel}</button>
+        </div>
         ${spxResultHtml}
+        ${cdiResultHtml}
+        <div class="tx-form-row" style="margin-top:8px">
+          <span class="muted small" style="align-self:center">Ibovespa del período (%, a mano)</span>
+          <input class="input-cell" inputmode="decimal" data-bind="ibovPctInput" value="${escapeAttr(hs.ibovPctInput)}" placeholder="ej. 12,4" style="max-width:90px">
+        </div>
+        <p class="upload-hint">No hay una fuente gratis confiable para buscar el Ibovespa automáticamente — cópialo de B3, Google Finance, etc. y pégalo acá.</p>
+        ${ibovDiffHtml}
       </div>`
     : "";
 
@@ -2204,6 +2407,13 @@ function renderHistorico() {
       ${totalReturnHtml}
       <div class="card">
         <div class="card-title-row">
+          <h2 class="card-title">Rendimiento acumulado (%)</h2>
+          <span class="${totalReturnPct >= 0 ? "up" : "down"} small"><b>${fmtPct(totalReturnPct)}</b></span>
+        </div>
+        <div class="chart-wrap">${twrSvg}</div>
+      </div>
+      <div class="card">
+        <div class="card-title-row">
           <h2 class="card-title">Patrimonio acumulado</h2>
           <span class="${cum >= 0 ? "up" : "down"} small"><b>${cum >= 0 ? "+" : ""}${fmtBRL(cum)}</b></span>
         </div>
@@ -2238,6 +2448,41 @@ function addDemo() {
   state.history = [...state.history, ...demo].sort((a, b) => new Date(a.date) - new Date(b.date));
   persistHistory();
   render();
+}
+
+// MEJORA #1 — El guardado diario automático (a las 20:00 hora de Brasil) solo funciona si la
+// app está abierta en ese momento. Si un día no se abrió, ese día queda sin registrar y se
+// rompe la reconstrucción "día a día" de la cartera. Esta función corre sola (sin que el
+// usuario toque nada) al abrir la app o al entrar a la pestaña "Historial", y rellena
+// cualquier hueco entre el último día guardado y hoy reutilizando la misma lógica de
+// "Importar histórico real" (datos REALES de Twelve Data, no estimaciones).
+let autoFillInProgress = false;
+async function autoFillHistoryGaps() {
+  if (autoFillInProgress) return;
+  const twelveKey = (state.posicoes?.apiKey || "").trim();
+  if (!twelveKey) return; // sin clave configurada no hay cómo buscar el histórico real
+
+  const sorted = [...state.history].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const lastDate = sorted.length ? dateToBrazilYMD(sorted[sorted.length - 1].date) : null;
+  const earliestTx = state.transactions.length
+    ? state.transactions.reduce((min, t) => (t.date < min ? t.date : min), state.transactions[0].date).slice(0, 10)
+    : null;
+  const fromDate = lastDate ? new Date(new Date(`${lastDate}T12:00:00Z`).getTime() + 86400000).toISOString().slice(0, 10) : earliestTx;
+  if (!fromDate) return; // todavía no hay ni historial ni transacciones: nada que rellenar
+  const toDate = todayYMD();
+  if (new Date(fromDate) > new Date(toDate)) return; // ya está al día, no hay huecos
+
+  if (!state.historico) resetHistoricoState();
+  state.historico.importFromDate = fromDate;
+  state.historico.importToDate = toDate;
+  state.historico.autoFillNotice = `Rellenando automáticamente del ${fmtShortDate(fromDate)} a hoy…`;
+  autoFillInProgress = true;
+  try {
+    await importRealHistory();
+  } finally {
+    autoFillInProgress = false;
+    if (state.historico) state.historico.autoFillNotice = null;
+  }
 }
 
 async function importRealHistory() {
@@ -2486,11 +2731,12 @@ function exportBackup() {
     quotes: cache.quotes,
     logos: cache.logos,
     fxRateInput: cache.fxRateInput,
+    dividendTaxPct: cache.dividendTaxPct,
   };
   downloadBlob(JSON.stringify(backup, null, 2), `pnl-backup-${todayYMD()}.json`, "application/json");
 }
 
-function parseCsvLine(line) {
+function parseCsvLine(line, delimiter = ",") {
   const out = [];
   let cur = "";
   let inQuotes = false;
@@ -2501,7 +2747,7 @@ function parseCsvLine(line) {
       else if (c === '"') inQuotes = false;
       else cur += c;
     } else if (c === '"') inQuotes = true;
-    else if (c === ",") { out.push(cur); cur = ""; }
+    else if (c === delimiter) { out.push(cur); cur = ""; }
     else cur += c;
   }
   out.push(cur);
@@ -2620,7 +2866,7 @@ function addTransaction() {
   f.error = null;
 
   if (!qty || qty <= 0) { f.error = "Ingresa una cantidad válida (mayor a 0)."; render(); return; }
-  if (f.type === "buy" && (!price || price <= 0)) { f.error = "Ingresa un precio válido (mayor a 0)."; render(); return; }
+  if ((f.type === "buy" || f.type === "dividend") && (!price || price <= 0)) { f.error = "Ingresa un precio válido (mayor a 0)."; render(); return; }
 
   // Si la operación es de hoy, el cambio USD/BRL configurado arriba YA ES el cambio histórico
   // correcto para esa fecha — se guarda directo en la transacción. Si es una fecha pasada, se
@@ -2629,6 +2875,7 @@ function addTransaction() {
 
   let ticker;
   if (f.rowId === "__new__") {
+    if (f.type === "dividend") { f.error = "Un dividendo se registra sobre una posición que ya existe. Selecciónala en \"Posición\"."; render(); return; }
     ticker = f.newTicker.trim().toUpperCase();
     if (!ticker) { f.error = "Ingresa el ticker de la nueva posición."; render(); return; }
     if (f.type === "sell") { f.error = "No se puede vender algo que todavía no está en tu carteira. Agrégalo como compra primero."; render(); return; }
@@ -2644,11 +2891,13 @@ function addTransaction() {
     const oldQty = parseNum(row.quantity);
     if (f.type === "buy") {
       row.quantity = oldQty + qty;
-    } else {
+      p.dirty = true;
+    } else if (f.type === "sell") {
       if (qty > oldQty + 0.0001) { f.error = `Esa posición solo tiene ${oldQty} unidades — no se puede vender ${qty}.`; render(); return; }
       row.quantity = Math.max(oldQty - qty, 0);
+      p.dirty = true;
     }
-    p.dirty = true;
+    // El dividendo NO modifica row.quantity: es un ingreso, no cambia cuántas acciones tienes.
     state.transactions.push({ id: uid(), source: "manual", ticker: row.ticker, date: new Date(`${f.date}T12:00:00`).toISOString(), type: f.type, qty, price: price || row.avgCost || 0, fx: fxForTx });
   }
   persistTransactions();
@@ -2657,6 +2906,8 @@ function addTransaction() {
   // partir de TODO el historial de transacciones, con el método de costo promedio. Se aplica
   // solo a la fila donde se registró esta transacción (no a otras filas que compartan el mismo
   // ticker en otra corretora, que pueden tener un costo real distinto no reflejado aquí).
+  // recomputeCostBasisFromTransactions ignora las filas "dividend" (solo mira buy/sell), así
+  // que registrar un dividendo nunca altera el precio promedio de compra.
   // Nota: f.rowId ya fue reasignado al id real de la fila más arriba, aunque haya empezado en "__new__".
   const { avgCostUsd, avgCostBrl } = recomputeCostBasisFromTransactions(ticker);
   p.rows = p.rows.map((r) => (r.id === f.rowId ? { ...r, avgCost: avgCostUsd, avgCostBrl } : r));
@@ -2670,6 +2921,70 @@ function addTransaction() {
   render();
 }
 
+// Aviso automático de dividendos faltantes ("híbrido": el monto NETO siempre se carga a mano
+// o por CSV, porque ninguna API gratis devuelve el monto neto real después de la retención de
+// EE. UU. — esto solo avisa que un pago existió, usando el endpoint de dividendos de Finnhub,
+// que en el plan gratis puede no estar disponible para todos los tickers; si no lo está, se
+// avisa y no rompe nada — los dividendos siguen pudiendo registrarse a mano o por CSV).
+async function checkMissingDividends() {
+  const p = state.posicoes;
+  const finnhubKey = (p.finnhubKey || "").trim();
+  if (!finnhubKey) {
+    p.dividendCheckError = "Configura tu clave de Finnhub (arriba) para poder buscar dividendos pendientes.";
+    render();
+    return;
+  }
+  p.dividendCheckStatus = "loading";
+  p.dividendCheckError = null;
+  p.missingDividends = [];
+  render();
+
+  const tickers = [...new Set(state.portfolio.map((r) => r.ticker).filter(Boolean))];
+  const earliestTx = state.transactions.length
+    ? state.transactions.reduce((min, t) => (t.date < min ? t.date : min), state.transactions[0].date).slice(0, 10)
+    : new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+  const toDate = todayYMD();
+
+  const existingByTicker = {};
+  state.transactions
+    .filter((t) => t.type === "dividend")
+    .forEach((t) => { (existingByTicker[t.ticker] = existingByTicker[t.ticker] || []).push(String(t.date).slice(0, 10)); });
+
+  const found = [];
+  let blocked = false;
+  await Promise.all(
+    tickers.map(async (sym) => {
+      try {
+        const url = `https://finnhub.io/api/v1/stock/dividend?symbol=${encodeURIComponent(sym)}&from=${earliestTx}&to=${toDate}&token=${encodeURIComponent(finnhubKey)}`;
+        const resp = await fetch(url);
+        if (resp.status === 403 || resp.status === 401) { blocked = true; return; }
+        const data = await resp.json();
+        if (!Array.isArray(data)) return;
+        data.forEach((d) => {
+          const perShare = parseFloat(d.amount);
+          const payDate = String(d.payDate || d.date || "").slice(0, 10);
+          if (!perShare || !payDate) return;
+          // tolerancia de unos días: la fecha que el usuario cargó (pago real) puede no
+          // coincidir exactamente con la que reporta la API (ex-date vs. pay date).
+          const already = (existingByTicker[sym] || []).some((ed) => Math.abs(new Date(`${ed}T12:00:00`) - new Date(`${payDate}T12:00:00`)) < 6 * 86400000);
+          if (!already) found.push({ ticker: sym, date: payDate, perShare });
+        });
+      } catch (_) {
+        // sin conexión u otro error puntual para este ticker: se ignora y se sigue con el resto
+      }
+    })
+  );
+
+  p.dividendCheckStatus = "idle";
+  p.missingDividends = found.sort((a, b) => new Date(b.date) - new Date(a.date));
+  p.dividendCheckError = blocked
+    ? "Tu plan de Finnhub no incluye histórico de dividendos para estos activos (suele requerir un plan pago) — puedes seguir registrándolos a mano o por CSV."
+    : found.length
+    ? null
+    : "No encontré dividendos pagados que no tengas ya registrados.";
+  render();
+}
+
 function importPurchasesFile(file) {
   const p = state.posicoes;
   const reader = new FileReader();
@@ -2677,7 +2992,10 @@ function importPurchasesFile(file) {
     try {
       const lines = String(reader.result).split(/\r?\n/).filter((l) => l.trim());
       if (!lines.length) throw new Error("vacío");
-      const header = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+      // Algunos exportadores (p. ej. Excel configurado en español/portugués) usan ";" como
+      // separador en vez de ",". Se detecta mirando cuál aparece más veces en el encabezado.
+      const delimiter = (lines[0].match(/;/g) || []).length > (lines[0].match(/,/g) || []).length ? ";" : ",";
+      const header = parseCsvLine(lines[0], delimiter).map((h) => h.trim().toLowerCase());
       const idx = {
         symbol: header.indexOf("symbol"),
         date: header.indexOf("date"),
@@ -2690,7 +3008,7 @@ function importPurchasesFile(file) {
         throw new Error("Faltan columnas (symbol, type, qty, price)");
       }
 
-      const txs = lines.slice(1).map((l) => parseCsvLine(l)).filter((c) => c.length >= 4);
+      const txs = lines.slice(1).map((l) => parseCsvLine(l, delimiter)).filter((c) => c.length >= 4);
       // sort chronologically so sells reduce the running average cost correctly, oldest first.
       txs.sort((a, b) => new Date(a[idx.date]) - new Date(b[idx.date]));
 
@@ -2712,12 +3030,17 @@ function importPurchasesFile(file) {
       const txKey = (t) => `${t.ticker}|${t.date}|${t.type}|${t.qty.toFixed(4)}|${t.price.toFixed(4)}`;
       const existingKeys = new Set(state.transactions.map(txKey));
       let fxBackfilledFromCsv = 0;
+      let dividendsImported = 0;
       txs.forEach((cols) => {
         const rawSym = (cols[idx.symbol] || "").trim();
         const sym = rawSym.includes(":") ? rawSym.split(":").pop() : rawSym;
         if (!sym) return;
         const type = (cols[idx.type] || "").trim().toLowerCase();
-        if (type !== "buy" && type !== "sell") return;
+        // "dividend" usa la misma columna "type" que buy/sell. El monto BRUTO (antes de la
+        // retención de EE. UU.) se guarda igual que una compra/venta: qty × price, donde price
+        // es el dividendo bruto por acción en US$ — así un split aplicado más tarde a ese
+        // ticker (qty×ratio, price÷ratio) sigue dejando el monto bruto total correcto.
+        if (type !== "buy" && type !== "sell" && type !== "dividend") return;
         const dateRaw = cols[idx.date] || "";
         const date = dateRaw ? new Date(dateRaw).toISOString() : new Date().toISOString();
         const fxFromFile = idx.fx !== -1 ? parseNum(cols[idx.fx]) || null : null;
@@ -2731,6 +3054,7 @@ function importPurchasesFile(file) {
         if (!existingKeys.has(key)) {
           existingKeys.add(key);
           state.transactions.push({ id: uid(), source: "csv", ...rec });
+          if (type === "dividend") dividendsImported++;
         } else if (fxFromFile) {
           // Esta transacción ya estaba guardada (de una importación anterior, posiblemente de
           // un archivo sin la columna "fx") — si todavía no tenía el cambio histórico, se
@@ -2769,13 +3093,16 @@ function importPurchasesFile(file) {
       });
       persistPortfolio();
       resetPosicoesState();
-      state.posicoes.quotesError = matched
+      state.posicoes.quotesError = matched || dividendsImported
         ? null
         : ["No encontré ningún ticker de ese archivo que coincida con tu carteira."];
       state.posicoes.importPurchasesMessage = matched
         ? `Precio de compra actualizado para ${matched} activo(s).` +
+          (dividendsImported ? ` Se importaron ${dividendsImported} dividendo(s).` : "") +
           (fxBackfilledFromCsv ? ` Se completó el cambio histórico (columna "fx") de ${fxBackfilledFromCsv} transacción(es) que ya tenías guardadas.` : "") +
           (duplicatesRemoved ? ` Se eliminaron ${duplicatesRemoved} transacción(es) duplicada(s) (de una versión sin ajustar por un desdoblamiento).` : "")
+        : dividendsImported
+        ? `Se importaron ${dividendsImported} dividendo(s).`
         : null;
       render();
     } catch (err) {
@@ -2809,6 +3136,9 @@ function importBackupFile(file) {
         localStorage.setItem("pnl-quotes", JSON.stringify(data.quotes || {}));
         localStorage.setItem("pnl-logos", JSON.stringify(data.logos || {}));
         localStorage.setItem("pnl-fx", JSON.stringify(typeof data.fxRateInput === "string" ? parseNum(data.fxRateInput) : data.fxRateInput || null));
+        if (data.dividendTaxPct !== undefined && data.dividendTaxPct !== null && data.dividendTaxPct !== "") {
+          localStorage.setItem("pnl-dividend-tax", String(data.dividendTaxPct));
+        }
       } catch (_) {}
       persistPortfolio();
       persistHistory();
@@ -2856,10 +3186,30 @@ function exportCsv() {
 
 function switchTab(tab) {
   state.tab = tab;
-  if (tab === "hoje") resetHojeState();
+  if (tab === "hoje") syncHojeOnTabEnter();
   else if (tab === "posicoes") resetPosicoesState();
-  else if (tab === "historico") resetHistoricoState();
+  else if (tab === "historico") {
+    resetHistoricoState();
+    autoFillHistoryGaps(); // dispara en segundo plano; importRealHistory() ya hace su propio render()
+  }
   render();
+}
+
+// A diferencia de resetHojeState() (que se usa para descartar/cancelar a propósito), esta
+// función se llama cada vez que se vuelve a la pestaña "Hoy" navegando desde otra pestaña.
+// Antes llamaba directo a resetHojeState(), que si hoy todavía no estaba guardado en el
+// historial (por ejemplo, una vista previa de "Actualizar variación"/pegar/manual que el
+// usuario no llegó a guardar) la reseteaba a "idle" y borraba esa vista previa — eso era lo
+// que hacía "desaparecer" el banner y el total con variación al navegar entre pestañas y
+// volver a "Hoy". Ahora solo se sincroniza con el historial (por si se guardó automáticamente
+// mientras el usuario estaba en otra pestaña); si no hay nada guardado pero ya existe una
+// vista previa en memoria ("result"/"review"), se conserva tal cual.
+function syncHojeOnTabEnter() {
+  const todayEntry = state.history.find((e) => dateToBrazilYMD(e.date) === brazilTodayYMD());
+  if (!todayEntry && state.hoje && (state.hoje.status === "result" || state.hoje.status === "review")) {
+    return; // hay una vista previa sin guardar: no la pisamos
+  }
+  resetHojeState();
 }
 
 function render() {
@@ -2950,6 +3300,18 @@ function handleAction(action, el) {
     case "trigger-import-backup": document.getElementById("import-backup-input")?.click(); break;
     case "trigger-import-purchases": document.getElementById("import-purchases-input")?.click(); break;
     case "add-transaction": addTransaction(); break;
+    case "check-missing-dividends": checkMissingDividends(); break;
+    case "quickadd-dividend": {
+      const f = state.posicoes.txForm;
+      const row = state.posicoes.rows.find((r) => r.ticker === el.dataset.ticker);
+      f.rowId = row ? row.id : "__new__";
+      f.type = "dividend";
+      f.date = el.dataset.date;
+      f.price = el.dataset.price;
+      f.qty = row ? String(row.quantity) : "";
+      render();
+      break;
+    }
     case "add-split": addSplitAction(); break;
     case "dedupe-splits": dedupeSplitsManualAction(); break;
     case "remove-split": removeSplitAction(id); break;
@@ -2961,6 +3323,7 @@ function handleAction(action, el) {
     case "export-csv": exportCsv(); break;
     case "edit-entry": startEditEntry(id); break;
     case "compare-spx": compareSpx(); break;
+    case "compare-cdi": compareCdi(); break;
     case "set-period": state.historico.periodFilter = el.dataset.period; render(); break;
     case "cancel-entry-edit": cancelEditEntry(); break;
     case "save-entry-edit": saveEntryEdit(); break;
@@ -2982,6 +3345,30 @@ function handleAction(action, el) {
 }
 
 const root = document.getElementById("app");
+
+// Algunos campos (tasa de retención de dividendos, % manual de Ibovespa, vista previa de
+// dividendo) necesitan un render() completo para reflejarse en otras partes de la pantalla,
+// pero un render() completo reemplaza todo el HTML y el navegador pierde el foco del input
+// donde se está escribiendo. Esta función guarda qué input (y qué posición del cursor) estaba
+// enfocado, renderiza, y reenfoca el mismo input en el mismo lugar — así escribir no salta.
+function renderPreservingFocus() {
+  const active = document.activeElement;
+  const sel =
+    active && active.matches && active.matches("[data-bind]")
+      ? { bind: active.dataset.bind, id: active.dataset.id, start: active.selectionStart, end: active.selectionEnd }
+      : null;
+  render();
+  if (sel) {
+    const elSel = sel.id ? `[data-bind="${sel.bind}"][data-id="${sel.id}"]` : `[data-bind="${sel.bind}"]`;
+    const el = root.querySelector(elSel);
+    if (el) {
+      el.focus();
+      if (typeof el.setSelectionRange === "function" && sel.start != null) {
+        try { el.setSelectionRange(sel.start, sel.end); } catch (_) {}
+      }
+    }
+  }
+}
 
 root.addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
@@ -3007,6 +3394,9 @@ root.addEventListener("input", (e) => {
     state.historico.importFromDate = el.value;
   } else if (bind === "importToDate") {
     state.historico.importToDate = el.value;
+  } else if (bind === "ibovPctInput") {
+    state.historico.ibovPctInput = el.value;
+    renderPreservingFocus();
   } else if (bind === "paste") {
     state.hoje.pasteText = el.value;
     const btn = document.querySelector('[data-action="parse-pasted"]');
@@ -3035,10 +3425,16 @@ root.addEventListener("input", (e) => {
     state.posicoes.txForm.newBroker = el.value;
   } else if (bind === "txQty") {
     state.posicoes.txForm.qty = el.value;
+    if (state.posicoes.txForm.type === "dividend") renderPreservingFocus(); // refresca la vista previa bruto/neto
   } else if (bind === "txPrice") {
     state.posicoes.txForm.price = el.value;
+    if (state.posicoes.txForm.type === "dividend") renderPreservingFocus();
   } else if (bind === "txDate") {
     state.posicoes.txForm.date = el.value;
+  } else if (bind === "dividendTaxPct") {
+    state.posicoes.dividendTaxPct = el.value;
+    persistQuotesCache();
+    renderPreservingFocus();
   } else if (bind === "splitTicker") {
     state.posicoes.splitForm.ticker = el.value;
   } else if (bind === "splitDate") {
@@ -3075,7 +3471,7 @@ root.addEventListener("change", (e) => {
   const txRowSel = e.target.closest('[data-bind="txRowId"]');
   if (txRowSel) { state.posicoes.txForm.rowId = txRowSel.value; render(); }
   const txTypeSel = e.target.closest('[data-bind="txType"]');
-  if (txTypeSel) state.posicoes.txForm.type = txTypeSel.value;
+  if (txTypeSel) { state.posicoes.txForm.type = txTypeSel.value; render(); }
 });
 
 /* ---------------------------------------------------------------------- */
@@ -3164,6 +3560,7 @@ resetPosicoesState();
 resetHistoricoState();
 render();
 startAutoSaveWatcher();
+autoFillHistoryGaps();
 
 </script>
 </body>
