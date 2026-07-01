@@ -94,6 +94,7 @@ html, body { margin: 0; padding: 0; background: var(--bg-app); }
 @keyframes scroll-tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 .tape-item { font-family: 'IBM Plex Mono', monospace; font-size: 12px; display: inline-flex; gap: 7px; align-items: center; color: var(--text-secondary); }
 .tape-item b { color: var(--text-primary); font-weight: 600; }
+.tape-price { color: var(--text-secondary); font-size: 11px; opacity: .75; }
 
 .tabbar { display: flex; gap: 4px; padding: 10px 14px 0; }
 .tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; padding: 10px 8px; border-radius: 8px 8px 0 0; cursor: pointer; border-bottom: 2px solid transparent; }
@@ -697,6 +698,16 @@ function dedupeSplitDuplicateTransactions() {
 }
 
 function resetHojeState() {
+  // Precargamos priceByTicker desde las cotizaciones ya cacheadas (de una sesión anterior o
+  // de una actualización de precios en la pestaña "Posiciones") para que el precio de cada
+  // activo aparezca en la tabla de variación INMEDIATAMENTE al abrir la app, sin tener que
+  // tocar "Actualizar variación" primero.
+  const cachedQuotes = state.posicoes?.quotes || loadQuotesCache().quotes;
+  const priceByTickerFromCache = {};
+  Object.entries(cachedQuotes).forEach(([sym, price]) => {
+    if (typeof price === "number" && price > 0) priceByTickerFromCache[sym] = { price, prevClose: null };
+  });
+
   // Si hoy (según la hora de Brasil) ya tiene un registro en el historial — guardado
   // automáticamente después de las 20:00 — se muestra esa información directamente en vez de
   // la pantalla "idle". Así la variación por activo se mantiene visible siempre, incluso al
@@ -723,6 +734,7 @@ function resetHojeState() {
       fetchStatus: "idle",
       fetchProgressLabel: null,
       savedAt: todayEntry.date,
+      priceByTicker: priceByTickerFromCache,
     };
     return;
   }
@@ -737,6 +749,7 @@ function resetHojeState() {
     fetchStatus: "idle",
     fetchProgressLabel: null,
     savedAt: null,
+    priceByTicker: priceByTickerFromCache,
   };
 }
 function loadQuotesCache() {
@@ -922,6 +935,15 @@ async function fetchQuotes() {
   p.quotesError = errors.length ? errors : null;
   p.rows = p.rows.map((r) => ({ ...r, price: typeof newQuotes[r.ticker] === "number" ? newQuotes[r.ticker] : r.price }));
   p.dirty = true;
+  // Sincronizamos también priceByTicker en state.hoje para que la tabla "Variación del día"
+  // muestre el precio actualizado aunque el usuario no haya tocado "Actualizar variación".
+  if (state.hoje) {
+    const pb = { ...state.hoje.priceByTicker };
+    Object.entries(newQuotes).forEach(([sym, price]) => {
+      if (typeof price === "number" && price > 0) pb[sym] = { price, prevClose: pb[sym]?.prevClose ?? null };
+    });
+    state.hoje.priceByTicker = pb;
+  }
   persistQuotesCache();
 
   p.quotesStatus = "idle";
@@ -1317,6 +1339,8 @@ function buildChart({ type, data, valueKey, labelKey, height = 180, maxLabels = 
 
 function renderTickerTape(portfolio, lastEntry) {
   const logos = state.posicoes?.logos || {};
+  const priceByTicker = state.hoje?.priceByTicker || {};
+  const quotes = state.posicoes?.quotes || {};
   const uniqueTickers = [...new Set(portfolio.map((p) => p.ticker))];
   const itemsByTicker = {};
   if (lastEntry) lastEntry.rows.forEach((r) => { itemsByTicker[r.ticker] = r.changePct; });
@@ -1324,12 +1348,17 @@ function renderTickerTape(portfolio, lastEntry) {
   if (lastEntry) tapeItems.push({ ticker: "USD/BRL", pct: lastEntry.fxPct });
   const doubled = [...tapeItems, ...tapeItems];
   const itemsHtml = doubled
-    .map(
-      (it) =>
-        `<span class="tape-item">${avatarHtml(it.ticker, logos[it.ticker], 18)}<b>${escapeHtml(it.ticker)}</b>${
-          typeof it.pct === "number" ? `<span class="${it.pct >= 0 ? "up" : "down"}">${fmtPct(it.pct)}</span>` : `<span class="muted">—</span>`
-        }</span>`
-    )
+    .map((it) => {
+      // Precio: primero lo que vino del último fetch (tiene prevClose), sino el cache de quotes
+      const pd = priceByTicker[it.ticker];
+      const price = pd?.price ?? quotes[it.ticker] ?? null;
+      const priceHtml = (it.ticker !== "USD/BRL" && price)
+        ? `<span class="tape-price">$${price.toFixed(2)}</span>`
+        : "";
+      return `<span class="tape-item">${avatarHtml(it.ticker, logos[it.ticker], 18)}<b>${escapeHtml(it.ticker)}</b>${priceHtml}${
+        typeof it.pct === "number" ? `<span class="${it.pct >= 0 ? "up" : "down"}">${fmtPct(it.pct)}</span>` : `<span class="muted">—</span>`
+      }</span>`;
+    })
     .join("");
   return `<div class="tape"><div class="tape-track">${itemsHtml}</div></div>`;
 }
