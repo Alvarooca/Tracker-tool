@@ -512,9 +512,9 @@ function persistSplits() {
   sbUpsertSplits(state.splits || []); // fire-and-forget
 }
 
-function persistPortfolio() {
+function persistPortfolio(skipCloud = false) {
   try { localStorage.setItem("pnl-portfolio", JSON.stringify(state.portfolio)); } catch (_) {}
-  sbUpsertPortfolio(state.portfolio); // fire-and-forget
+  if (!skipCloud) sbUpsertPortfolio(state.portfolio); // fire-and-forget
 }
 
 function persistHistory() {
@@ -3863,13 +3863,9 @@ async function sbUpsertPortfolio(portfolio) {
     saldo: p.saldo, sort_order: i,
   }));
   await sbRequest("POST", "portfolio", rows, "?on_conflict=id");
-  // Eliminar posiciones que ya no existen localmente
-  const ids = portfolio.map((p) => p.id);
-  const existing = await sbRequest("GET", "portfolio", null, `?user_id=eq.${SB_USER}&select=id`);
-  if (existing) {
-    const toDelete = existing.filter((r) => !ids.includes(r.id)).map((r) => r.id);
-    if (toDelete.length) await sbRequest("DELETE", "portfolio", null, `?id=in.(${toDelete.join(",")})`);
-  }
+  // NOTA: no eliminamos filas de la nube desde el pull — solo desde el push explícito.
+  // Si lo hiciéramos aquí, un dispositivo recién sincronizado (con portfolio parcial)
+  // podría borrar filas válidas de la nube que todavía no descargó.
 }
 
 async function sbUpsertSplits(splits) {
@@ -3912,42 +3908,35 @@ async function syncPullFromCloud() {
       if (newTxs.length) { state.transactions = [...state.transactions, ...newTxs]; changed = true; }
     }
 
-    // Portfolio — la nube es siempre fuente de verdad si tiene datos.
-    // Si el local está vacío (dispositivo nuevo) o la nube tiene más filas, se reemplaza todo.
-    // Si ambos tienen datos, se fusionan: la nube gana en filas que comparten ID (más reciente),
-    // y se agregan las filas que solo existen en uno u otro lado.
+    // Portfolio — la nube es siempre fuente de verdad.
+    // Reemplazamos el portfolio local completo con el de la nube, preservando
+    // el campo `price` (cotización en vivo) si ya lo teníamos localmente.
     if (cloudPortfolio?.length) {
+      const localPriceById = Object.fromEntries(state.portfolio.map((p) => [p.id, p.price ?? ""]));
       const cloudMapped = cloudPortfolio.map((r) => ({
         id: r.id, ticker: r.ticker, broker: r.broker ?? "",
-        quantity: Number(r.quantity), avgCost: r.avg_cost ? Number(r.avg_cost) : null,
+        quantity: Number(r.quantity),
+        avgCost: r.avg_cost ? Number(r.avg_cost) : null,
         avgCostBrl: r.avg_cost_brl ? Number(r.avg_cost_brl) : null,
-        saldo: Number(r.saldo), price: "",
+        saldo: Number(r.saldo),
+        price: localPriceById[r.id] ?? "",
       }));
-      if (!state.portfolio.length) {
-        // Dispositivo nuevo sin datos locales — tomar todo de la nube
-        state.portfolio = cloudMapped; changed = true;
-      } else {
-        // Fusión: la nube gana en filas existentes (tiene el avgCost/avgCostBrl más actualizado),
-        // se agregan filas que solo están en un lado
-        const localById = Object.fromEntries(state.portfolio.map((p) => [p.id, p]));
-        const cloudById = Object.fromEntries(cloudMapped.map((p) => [p.id, p]));
-        const allIds = new Set([...Object.keys(localById), ...Object.keys(cloudById)]);
-        const merged = [...allIds].map((id) => cloudById[id] ?? localById[id]);
-        const mergedStr = JSON.stringify(merged.map((p) => p.id).sort());
-        const localStr = JSON.stringify(state.portfolio.map((p) => p.id).sort());
-        if (mergedStr !== localStr || cloudMapped.some((cp) => {
-          const lp = localById[cp.id];
-          return lp && (cp.avgCost !== lp.avgCost || cp.avgCostBrl !== lp.avgCostBrl || cp.quantity !== lp.quantity);
-        })) {
-          state.portfolio = merged; changed = true;
-        }
-      }
+      // Solo marcamos como changed si algo realmente difiere (evita re-renders innecesarios)
+      const differs = cloudMapped.some((cp) => {
+        const lp = state.portfolio.find((p) => p.id === cp.id);
+        return !lp || lp.quantity !== cp.quantity || lp.avgCost !== cp.avgCost || lp.avgCostBrl !== cp.avgCostBrl;
+      }) || cloudMapped.length !== state.portfolio.length;
+      if (differs) { state.portfolio = cloudMapped; changed = true; }
     }
 
-    // Splits
+    // Splits — deduplicar por contenido (ticker+date+ratio) además de por ID,
+    // para el caso en que el mismo split fue creado en dos dispositivos con UIDs distintos.
     if (cloudSplits?.length) {
+      const splitKey = (s) => `${s.ticker}|${String(s.date).slice(0, 10)}|${s.ratio}`;
+      const localKeys = new Set((state.splits || []).map(splitKey));
       const localIds = new Set((state.splits || []).map((s) => s.id));
-      const newSplits = cloudSplits.filter((r) => !localIds.has(r.id))
+      const newSplits = cloudSplits
+        .filter((r) => !localIds.has(r.id) && !localKeys.has(splitKey({ ticker: r.ticker, date: r.date, ratio: Number(r.ratio) })))
         .map((r) => ({ id: r.id, ticker: r.ticker, date: r.date, ratio: Number(r.ratio) }));
       if (newSplits.length) { state.splits = [...(state.splits || []), ...newSplits]; changed = true; }
     }
@@ -3976,7 +3965,7 @@ async function syncPullFromCloud() {
     if (changed) {
       persistHistory();
       persistTransactions();
-      persistPortfolio();
+      persistPortfolio(true); // skipCloud=true: ya vino de la nube, no re-subir
       persistSplits();
       resetHojeState();
       resetPosicoesState();
