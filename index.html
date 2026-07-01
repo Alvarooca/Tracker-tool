@@ -782,6 +782,14 @@ function persistQuotesCache() {
     if (p.quotesUpdatedAt) localStorage.setItem("pnl-quotes-updated-at", p.quotesUpdatedAt);
     localStorage.setItem("pnl-dividend-tax", p.dividendTaxPct ?? "30");
   } catch (_) {}
+  // Subir claves y configuración a Supabase para que otros dispositivos las reciban
+  const settings = [
+    { key: "finnhub-key", user_id: SB_USER, value: p.finnhubKey || "" },
+    { key: "twelvedata-key", user_id: SB_USER, value: p.apiKey || "" },
+    { key: "fx", user_id: SB_USER, value: JSON.stringify(parseNum(p.fxRateInput) || null) },
+    { key: "dividend-tax", user_id: SB_USER, value: p.dividendTaxPct ?? "30" },
+  ].filter((s) => s.value && s.value !== "null");
+  if (settings.length) sbRequest("POST", "settings", settings, "?on_conflict=user_id,key");
 }
 
 function persistDividends() {
@@ -3875,21 +3883,18 @@ async function sbUpsertSplits(splits) {
 // ── PULL — descarga datos de la nube al abrir la app ────────────────────────
 
 async function syncPullFromCloud() {
-  // Descarga en paralelo todas las tablas del usuario y las fusiona con localStorage.
-  // Regla de fusión: la nube gana solo si el campo "id" no existe localmente todavía
-  // (los datos locales nunca se pisan), excepto en portfolio donde la nube es fuente
-  // de verdad (orden de filas, saldo guardado).
   try {
-    const [cloudHistory, cloudTxs, cloudPortfolio, cloudSplits] = await Promise.all([
+    const [cloudHistory, cloudTxs, cloudPortfolio, cloudSplits, cloudSettings] = await Promise.all([
       sbRequest("GET", "history", null, `?user_id=eq.${SB_USER}&select=*&order=date.asc`),
       sbRequest("GET", "transactions", null, `?user_id=eq.${SB_USER}&select=*&order=date.asc`),
       sbRequest("GET", "portfolio", null, `?user_id=eq.${SB_USER}&select=*&order=sort_order.asc`),
       sbRequest("GET", "splits", null, `?user_id=eq.${SB_USER}&select=*`),
+      sbRequest("GET", "settings", null, `?user_id=eq.${SB_USER}&select=*`),
     ]);
 
     let changed = false;
 
-    // Historial
+    // Historial — agregar entradas que faltan localmente
     if (cloudHistory?.length) {
       const localIds = new Set(state.history.map((e) => e.id));
       const newEntries = cloudHistory
@@ -3898,7 +3903,7 @@ async function syncPullFromCloud() {
       if (newEntries.length) { state.history = [...state.history, ...newEntries].sort((a, b) => new Date(a.date) - new Date(b.date)); changed = true; }
     }
 
-    // Transacciones
+    // Transacciones — agregar las que faltan localmente
     if (cloudTxs?.length) {
       const localIds = new Set(state.transactions.map((t) => t.id));
       const newTxs = cloudTxs
@@ -3907,20 +3912,35 @@ async function syncPullFromCloud() {
       if (newTxs.length) { state.transactions = [...state.transactions, ...newTxs]; changed = true; }
     }
 
-    // Portfolio — si la nube tiene más filas o difiere, se usa la nube
+    // Portfolio — la nube es siempre fuente de verdad si tiene datos.
+    // Si el local está vacío (dispositivo nuevo) o la nube tiene más filas, se reemplaza todo.
+    // Si ambos tienen datos, se fusionan: la nube gana en filas que comparten ID (más reciente),
+    // y se agregan las filas que solo existen en uno u otro lado.
     if (cloudPortfolio?.length) {
-      const cloudMapped = cloudPortfolio.map((r) => ({ id: r.id, ticker: r.ticker, broker: r.broker, quantity: Number(r.quantity), avgCost: r.avg_cost ? Number(r.avg_cost) : null, avgCostBrl: r.avg_cost_brl ? Number(r.avg_cost_brl) : null, saldo: Number(r.saldo), price: "" }));
-      const localIds = new Set(state.portfolio.map((p) => p.id));
-      const cloudIds = new Set(cloudPortfolio.map((r) => r.id));
-      // Si hay IDs en la nube que no están local, la nube tiene datos más recientes de otro dispositivo
-      const cloudHasNew = cloudPortfolio.some((r) => !localIds.has(r.id));
-      const localHasExtra = state.portfolio.some((p) => !cloudIds.has(p.id));
-      if (cloudHasNew && !localHasExtra) { state.portfolio = cloudMapped; changed = true; }
-      else if (cloudHasNew) {
-        // Fusión: priorizar local para filas en conflicto, agregar las nuevas de la nube
-        const merged = [...state.portfolio];
-        cloudMapped.forEach((cp) => { if (!localIds.has(cp.id)) merged.push(cp); });
-        state.portfolio = merged; changed = true;
+      const cloudMapped = cloudPortfolio.map((r) => ({
+        id: r.id, ticker: r.ticker, broker: r.broker ?? "",
+        quantity: Number(r.quantity), avgCost: r.avg_cost ? Number(r.avg_cost) : null,
+        avgCostBrl: r.avg_cost_brl ? Number(r.avg_cost_brl) : null,
+        saldo: Number(r.saldo), price: "",
+      }));
+      if (!state.portfolio.length) {
+        // Dispositivo nuevo sin datos locales — tomar todo de la nube
+        state.portfolio = cloudMapped; changed = true;
+      } else {
+        // Fusión: la nube gana en filas existentes (tiene el avgCost/avgCostBrl más actualizado),
+        // se agregan filas que solo están en un lado
+        const localById = Object.fromEntries(state.portfolio.map((p) => [p.id, p]));
+        const cloudById = Object.fromEntries(cloudMapped.map((p) => [p.id, p]));
+        const allIds = new Set([...Object.keys(localById), ...Object.keys(cloudById)]);
+        const merged = [...allIds].map((id) => cloudById[id] ?? localById[id]);
+        const mergedStr = JSON.stringify(merged.map((p) => p.id).sort());
+        const localStr = JSON.stringify(state.portfolio.map((p) => p.id).sort());
+        if (mergedStr !== localStr || cloudMapped.some((cp) => {
+          const lp = localById[cp.id];
+          return lp && (cp.avgCost !== lp.avgCost || cp.avgCostBrl !== lp.avgCostBrl || cp.quantity !== lp.quantity);
+        })) {
+          state.portfolio = merged; changed = true;
+        }
       }
     }
 
@@ -3932,13 +3952,32 @@ async function syncPullFromCloud() {
       if (newSplits.length) { state.splits = [...(state.splits || []), ...newSplits]; changed = true; }
     }
 
+    // Settings — claves API y configuración (la nube gana si hay un valor y local está vacío)
+    if (cloudSettings?.length) {
+      const settingsMap = Object.fromEntries(cloudSettings.map((s) => [s.key, s.value]));
+      let settingsChanged = false;
+      try {
+        if (settingsMap["finnhub-key"] && !localStorage.getItem("pnl-finnhub-key")) {
+          localStorage.setItem("pnl-finnhub-key", settingsMap["finnhub-key"]); settingsChanged = true;
+        }
+        if (settingsMap["twelvedata-key"] && !localStorage.getItem("pnl-twelvedata-key")) {
+          localStorage.setItem("pnl-twelvedata-key", settingsMap["twelvedata-key"]); settingsChanged = true;
+        }
+        if (settingsMap["fx"] && !localStorage.getItem("pnl-fx")) {
+          localStorage.setItem("pnl-fx", settingsMap["fx"]); settingsChanged = true;
+        }
+        if (settingsMap["dividend-tax"] && !localStorage.getItem("pnl-dividend-tax")) {
+          localStorage.setItem("pnl-dividend-tax", settingsMap["dividend-tax"]); settingsChanged = true;
+        }
+      } catch (_) {}
+      if (settingsChanged) changed = true;
+    }
+
     if (changed) {
-      // Persistir localmente lo que vino de la nube
       persistHistory();
       persistTransactions();
       persistPortfolio();
       persistSplits();
-      // Re-inicializar y renderizar con los datos actualizados
       resetHojeState();
       resetPosicoesState();
       resetHistoricoState();
@@ -4008,11 +4047,19 @@ async function requestPushPermission() {
 
 // Sube TODO el estado local a la nube (úsalo la primera vez para "sembrar" Supabase)
 async function syncPushAllToCloud() {
+  const p = state.posicoes;
+  const settings = [
+    { key: "finnhub-key", user_id: SB_USER, value: p?.finnhubKey || "" },
+    { key: "twelvedata-key", user_id: SB_USER, value: p?.apiKey || "" },
+    { key: "fx", user_id: SB_USER, value: JSON.stringify(parseNum(p?.fxRateInput) || null) },
+    { key: "dividend-tax", user_id: SB_USER, value: p?.dividendTaxPct ?? "30" },
+  ].filter((s) => s.value && s.value !== "null" && s.value !== '""');
   await Promise.all([
     sbUpsertHistory(state.history),
     sbUpsertTransactions(state.transactions),
     sbUpsertPortfolio(state.portfolio),
     sbUpsertSplits(state.splits || []),
+    settings.length ? sbRequest("POST", "settings", settings, "?on_conflict=user_id,key") : Promise.resolve(),
   ]);
   console.log("[supabase] Push completo — todos los datos locales subidos a la nube");
 }
