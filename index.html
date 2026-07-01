@@ -75,6 +75,7 @@ html, body { margin: 0; padding: 0; background: var(--bg-app); }
 .header-total-label { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
 .header-total-value { font-family: 'IBM Plex Mono', monospace; font-size: 20px; font-weight: 600; }
 .header-total-change { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; margin-top: 2px; }
+.header-fx-rate { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 11px; margin-top: 3px; opacity: .7; }
 
 .install-pill { background: transparent; border: 1px solid var(--accent-gold); color: var(--accent-gold); font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; padding: 7px 11px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 .install-pill[hidden] { display: none; }
@@ -1376,13 +1377,17 @@ function renderHojeReviewResult() {
   const rowsHtml = portfolio
     .map((p) => {
       const row = h.result ? h.result.rows.find((r) => r.id === p.id) : null;
+      const priceInfo = h.priceByTicker?.[p.ticker];
+      const priceCell = priceInfo
+        ? `<span class="small muted" style="font-variant-numeric:tabular-nums">US$ ${priceInfo.price.toFixed(2)} <span style="opacity:.6">(${priceInfo.prevClose.toFixed(2)})</span></span>`
+        : "";
       const pctCell =
         h.status === "review"
           ? `<input class="input-cell" inputmode="decimal" data-bind="review" data-id="${p.id}" value="${escapeAttr(h.reviewMap[p.id] ?? "0")}">`
           : `<span class="${row.changePct >= 0 ? "up" : "down"}">${fmtPct(row.changePct)}</span>`;
       const gainCell = showResultColumns ? `<td class="num ${row.gain >= 0 ? "up" : "down"}">${fmtBRL(row.gain)}</td>` : "";
       return `<tr>
-        <td><div class="ticker-cell">${avatarHtml(p.ticker, state.posicoes?.logos?.[p.ticker], 20)}<span><b>${escapeHtml(p.ticker)}</b><span class="muted small"> · ${escapeHtml(p.broker)}</span></span></div></td>
+        <td><div class="ticker-cell">${avatarHtml(p.ticker, state.posicoes?.logos?.[p.ticker], 20)}<span><b>${escapeHtml(p.ticker)}</b><span class="muted small"> · ${escapeHtml(p.broker)}</span>${priceCell ? `<br>${priceCell}` : ""}</span></div></td>
         <td class="num">${pctCell}</td>
         ${gainCell}
       </tr>`;
@@ -1486,7 +1491,7 @@ async function fetchLiveDayChange(opts = {}) {
 
   const tickers = [...new Set(state.portfolio.map((p) => p.ticker).filter(Boolean))];
   const errors = [];
-  const pctByTicker = {};
+  const pctByTicker = {};   // { SYM: { pct, price, prevClose } }
   let fxPct = null;
 
   // Stocks via Finnhub — 60 calls/min on the free plan, so every ticker fetches at once.
@@ -1499,11 +1504,13 @@ async function fetchLiveDayChange(opts = {}) {
           const resp = await fetch(url);
           const data = await resp.json();
           const pct = Number(data?.dp);
-          if (!Number.isFinite(pct) || (Number(data?.c) === 0 && Number(data?.pc) === 0)) {
+          const price = Number(data?.c);
+          const prevClose = Number(data?.pc);
+          if (!Number.isFinite(pct) || (price === 0 && prevClose === 0)) {
             errors.push(`Sin variación para ${sym}.`);
             return;
           }
-          pctByTicker[sym] = pct;
+          pctByTicker[sym] = { pct, price, prevClose };
         } catch (err) {
           errors.push(`No pude buscar ${sym} en Finnhub (sin conexión).`);
         }
@@ -1537,9 +1544,25 @@ async function fetchLiveDayChange(opts = {}) {
   const map = {};
   state.portfolio.forEach((p) => {
     const v = pctByTicker[p.ticker];
-    map[p.id] = typeof v === "number" ? String(v) : "0";
+    map[p.id] = typeof v === "object" ? String(v.pct) : "0";
   });
   h.reviewMap = map;
+  // También guardamos el precio actual y el cierre anterior por ticker para mostrarlo en la tabla
+  h.priceByTicker = {};
+  Object.entries(pctByTicker).forEach(([sym, d]) => { h.priceByTicker[sym] = d; });
+  // Actualizamos el precio en posicoes.rows también (igual que hace fetchQuotes), así el
+  // banner del header y la tabla de posiciones quedan sincronizados con el precio en vivo.
+  if (state.posicoes) {
+    const newQuotes = { ...state.posicoes.quotes };
+    Object.entries(pctByTicker).forEach(([sym, d]) => { if (d.price) newQuotes[sym] = d.price; });
+    state.posicoes.quotes = newQuotes;
+    state.posicoes.rows = state.posicoes.rows.map((r) => {
+      const q = pctByTicker[r.ticker];
+      return q && q.price ? { ...r, price: q.price } : r;
+    });
+    state.posicoes.quotesUpdatedAt = new Date().toISOString();
+    persistQuotesCache();
+  }
   h.fxPctInput = fxPct !== null ? String(fxPct) : "0";
   h.error = errors.length ? errors.join(" ") : null;
   h.fetchStatus = "idle";
@@ -3318,6 +3341,8 @@ function render() {
   // se usa esa vista previa para que la variación del día aparezca en el saldo total
   // (número grande) del header en todas las pestañas, no solo después de guardarse.
   const dayChangeSource = isTodayEntry ? lastEntry : state.hoje && state.hoje.status === "result" ? state.hoje.result : null;
+  const fxRate = parseNum(state.posicoes?.fxRateInput);
+  const fxRateHtml = fxRate ? `<span class="header-fx-rate muted small">US$ 1 = R$ ${fxRate.toFixed(4)}</span>` : "";
   const dayChangeHtml = dayChangeSource
     ? `<span class="header-total-change ${dayChangeSource.total >= 0 ? "up" : "down"}">${dayChangeSource.total >= 0 ? "+" : ""}${fmtBRL(dayChangeSource.total)} (${fmtPct(totalSaldo ? (dayChangeSource.total / totalSaldo) * 100 : 0)})</span>`
     : "";
@@ -3340,6 +3365,7 @@ function render() {
               </div>
               <span class="header-total-value" id="header-total-value">${displayedTotal}</span>
               ${dayChangeHtml}
+              ${fxRateHtml}
             </div>
           </div>
         </div>
@@ -3643,6 +3669,58 @@ function startAutoSaveWatcher() {
   setInterval(maybeAutoSaveToday, 60000);
 }
 
+// Auto-refresh de cotizaciones cada 30 minutos SOLO durante el horario de mercado de EE. UU.
+// (9:30 - 16:00 ET, lunes a viernes). Fuera de ese horario no consume créditos de API.
+// Cada dispositivo con la app abierta corre su propio timer — con 2 dispositivos y 8 activos
+// el consumo es ~208 créditos/día (muy por debajo del límite de 800 del plan gratuito).
+const MARKET_OPEN_HOUR_ET = 9;   // 9:30 ET
+const MARKET_OPEN_MIN_ET = 30;
+const MARKET_CLOSE_HOUR_ET = 16; // 16:00 ET
+const AUTO_REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutos
+
+function isMarketOpen() {
+  if (isMarketClosedToday()) return false; // fin de semana o feriado
+  // La zona horaria ET (Eastern Time) es UTC-5 en invierno y UTC-4 en verano. En vez de
+  // importar una librería de tz, usamos Intl para leer la hora local en ET directamente.
+  try {
+    const etNow = new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false });
+    const [hStr, mStr] = etNow.split(":");
+    const h = parseInt(hStr, 10);
+    const m = parseInt(mStr, 10);
+    const minutesSinceMidnight = h * 60 + m;
+    const open = MARKET_OPEN_HOUR_ET * 60 + MARKET_OPEN_MIN_ET;
+    const close = MARKET_CLOSE_HOUR_ET * 60;
+    return minutesSinceMidnight >= open && minutesSinceMidnight < close;
+  } catch (_) {
+    // Intl no disponible en algún navegador muy viejo — asumimos mercado abierto para no
+    // perder la actualización (el consumo de créditos ya es muy bajo de todas formas).
+    return true;
+  }
+}
+
+async function autoRefreshQuotes() {
+  if (!isMarketOpen()) return; // fuera del horario, no hacer nada
+  const finnhubKey = (state.posicoes?.finnhubKey || "").trim();
+  if (!finnhubKey) return; // sin clave no hay precio que buscar
+  // Si hay una edición manual en curso en la pestaña "Hoy", no interrumpir
+  if (state.hoje?.status === "review") return;
+  // Actualiza tanto los precios en posicoes como el banner de variación del día
+  await fetchLiveDayChange();
+}
+
+function startAutoRefresh() {
+  // El primer tick ocurre al abrir la app (si el mercado está abierto), luego cada 30 min.
+  autoRefreshQuotes();
+  setInterval(autoRefreshQuotes, AUTO_REFRESH_INTERVAL_MS);
+}
+
+// Cuando el usuario vuelve a la pestaña/ventana después de tenerla en segundo plano, puede
+// haber pasado más de 30 min y el timer interno puede haberse "pausado" (los navegadores
+// limitan los timers en tabs inactivas). Por eso al recuperar el foco también se refresca.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") autoRefreshQuotes();
+});
+
 /* ---------------------------------------------------------------------- */
 /*  Init                                                                   */
 /* ---------------------------------------------------------------------- */
@@ -3654,6 +3732,7 @@ resetHistoricoState();
 render();
 startAutoSaveWatcher();
 autoFillHistoryGaps();
+startAutoRefresh();
 
 </script>
 </body>
